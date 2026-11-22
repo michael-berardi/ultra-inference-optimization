@@ -110,15 +110,39 @@ class GGUF:
     @property
     def attention_layers(self) -> list[int]:
         """Layers that keep a KV cache. Hybrid models have recurrent layers without attention."""
-        have = set()
+        # Hybrid models state it: <arch>.attention.recurrent_layers (a per-layer bool list) or full_attention_interval.
+        flags = self.key("attention.recurrent_layers", None)
+        if isinstance(flags, list) and len(flags) == self.n_layer:
+            return [i for i, recurrent in enumerate(flags) if not recurrent]
+        interval = self.key("full_attention_interval", None)
+        if isinstance(interval, int) and interval > 1:
+            return [i for i in range(self.n_layer) if (i + 1) % interval == 0]
+        # Otherwise a layer keeps KV when it has attention projections and no recurrent (SSM) state. A layer with a fused
+        # attn_qkv beside ssm_* tensors is a linear-attention layer: it keeps a fixed-size state, not a KV cache.
+        attn, ssm = set(), set()
         pat = re.compile(r"^blk\.(\d+)\.(attn_k|attn_qkv|attn_k_b|attn_kv_a_mqa)\.")
+        spat = re.compile(r"^blk\.(\d+)\.ssm_")
         for t in self.tensors:
             m = pat.match(t.name)
             if m:
-                have.add(int(m.group(1)))
+                attn.add(int(m.group(1)))
+            m = spat.match(t.name)
+            if m:
+                ssm.add(int(m.group(1)))
+        have = attn - ssm
         if have:
             return sorted(have)
         return list(range(self.n_layer))
+
+    @property
+    def draft_layer_bytes(self) -> int:
+        """Bytes of a built-in multi-token-prediction (MTP / nextn) draft layer, read on every draft step."""
+        layers = {int(t.name.split(".")[1]) for t in self.tensors if t.name.startswith("blk.") and ".nextn." in t.name}
+        return sum(t.nbytes for t in self.tensors if t.name.startswith("blk.") and int(t.name.split(".")[1]) in layers)
+
+    @property
+    def output_head_bytes(self) -> int:
+        return sum(t.nbytes for t in self.tensors if t.name == "output.weight")
 
     @property
     def head_dims(self) -> tuple[int, int]:

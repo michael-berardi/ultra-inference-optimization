@@ -33,6 +33,41 @@ class GgufTests(unittest.TestCase):
         tiny_model(self.path, hybrid=False)
         self.assertEqual(gguf.read_gguf(str(self.path)).attention_layers, [0, 1, 2, 3])
 
+    def test_fused_qkv_linear_attention_with_ssm_state_keeps_no_kv(self):
+        # Real hybrid layout (Qwen3.5-style): linear-attention layers carry a fused attn_qkv beside ssm_* state; only the full
+        # attention layers keep KV. The first version counted every layer as KV (65 vs 17), a 3.8x KV error.
+        from support import write_gguf
+        F32 = 0
+        meta = {"general.architecture": "hy", "hy.block_count": 4, "hy.embedding_length": 64, "hy.attention.head_count": 8,
+                "hy.attention.head_count_kv": 2}
+        tensors = []
+        for i in range(4):
+            if i % 2 == 0:
+                tensors += [(f"blk.{i}.attn_qkv.weight", [64, 192], F32, 64), (f"blk.{i}.ssm_a", [16], F32, 64)]
+            else:
+                tensors += [(f"blk.{i}.attn_k.weight", [64, 16], F32, 64), (f"blk.{i}.attn_q.weight", [64, 64], F32, 64)]
+        write_gguf(self.path, meta, tensors)
+        self.assertEqual(gguf.read_gguf(str(self.path)).attention_layers, [1, 3])
+
+    def test_recurrent_layers_flag_list_wins(self):
+        from support import write_gguf
+        meta = {"general.architecture": "hy", "hy.block_count": 4, "hy.embedding_length": 64, "hy.attention.head_count": 8,
+                "hy.attention.recurrent_layers": [True, True, True, False]}
+        write_gguf(self.path, meta, [(f"blk.{i}.attn_qkv.weight", [64, 192], 0, 64) for i in range(4)])
+        self.assertEqual(gguf.read_gguf(str(self.path)).attention_layers, [3])
+
+    def test_builtin_mtp_draft_is_counted_per_draft_step(self):
+        from support import write_gguf
+        meta = {"general.architecture": "hy", "hy.block_count": 2, "hy.embedding_length": 64, "hy.attention.head_count": 8}
+        tensors = [("blk.0.attn_k.weight", [64, 16], 0, 1024), ("blk.1.attn_k.weight", [64, 16], 0, 1024),
+                   ("blk.1.nextn.eh_proj.weight", [64, 64], 0, 512), ("output.weight", [64, 64], 0, 320)]
+        write_gguf(self.path, meta, tensors)
+        g = gguf.read_gguf(str(self.path))
+        self.assertEqual(g.draft_layer_bytes, 1536)  # the whole nextn block (its attn_k plus the nextn projection)
+        self.assertEqual(g.output_head_bytes, 320)
+        w, _p, _n = ceiling.active_weight_bytes(g)
+        self.assertEqual(w, 1024 + 1024 + 320)  # the nextn tensor itself is not a per-token target weight  # the nextn tensor is not counted as a per-token target weight
+
     def test_bad_magic_and_truncated(self):
         self.path.write_bytes(b"NOPE" + b"\0" * 40)
         with self.assertRaises(Exception) as c:

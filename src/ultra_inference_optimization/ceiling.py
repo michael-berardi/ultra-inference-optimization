@@ -36,6 +36,8 @@ def active_weight_bytes(g: GGUF) -> tuple[float, int, list[str]]:
     for t in g.tensors:
         if t.name == "token_embd.weight" and has_head:
             continue  # lookup reads one row per token, negligible
+        if ".nextn." in t.name:
+            continue  # the built-in MTP draft head is counted per draft step, not per verified token
         if "_exps" in t.name and frac < 1.0:
             total += t.nbytes * frac
             params += t.elements * frac
@@ -78,6 +80,11 @@ def compute(g: GGUF, bandwidth_gbs: float, ctx: int = 4096, kv_type: str = "f16"
         d_bytes = 0.0
         if draft_gguf is not None:
             d_bytes, _p, _n = active_weight_bytes(draft_gguf)
+        elif g.draft_layer_bytes:
+            # Built-in MTP head: each draft step reads the nextn layer and the output head (the vocabulary projection).
+            d_bytes = float(g.draft_layer_bytes + g.output_head_bytes)
+            arith.append(f"built-in MTP draft step reads nextn layer {g.draft_layer_bytes:,} B + output head "
+                         f"{g.output_head_bytes:,} B = {d_bytes:,.0f} B")
         cycle = bytes_tok + d_bytes * draft_n
         spec = bw / cycle * L if cycle else None
         arith.append(f"accepted length L = (1 - a^(k+1)) / (1 - a) with a={draft_accept}, k={draft_n} -> {L:.3f} tokens/pass")
