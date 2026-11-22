@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import random
+import re
 import secrets
 
 from . import bench
@@ -50,7 +51,14 @@ def make_needle_prompt(rng: random.Random, words: int, code: str) -> str:
     return (". ".join(sents) + "\n\nWhat is the vault passphrase? Answer with the passphrase only.")
 
 
+THINK_BLOCK = re.compile(r"(?is)<think>.*?</think>")
+
+
 def _norm(t: str) -> str:
+    """The answer itself: a reasoning block left inline in the content (an empty <think></think> when thinking is switched off,
+    or a whole block when the server does not split reasoning out) is not part of it (2026-11-21: a real model answered every
+    needle exactly behind an empty think block and scored 0/6)."""
+    t = THINK_BLOCK.sub("", t or "")
     return t.strip().strip("`'\".").strip()
 
 

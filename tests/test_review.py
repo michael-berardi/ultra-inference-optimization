@@ -552,3 +552,11 @@ class Docs(unittest.TestCase):  # 3, 8, 13
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NeedleNormTests(unittest.TestCase):
+    def test_inline_think_block_is_not_part_of_the_answer(self):
+        from ultra_inference_optimization import gates
+        self.assertEqual(gates._norm("<think>\n\n</think>\n\nsummit-6763"), "summit-6763")
+        self.assertEqual(gates._norm("<think>the code is x</think> `lagoon-7759`."), "lagoon-7759")
+        self.assertEqual(gates._norm("plain-1234"), "plain-1234")
