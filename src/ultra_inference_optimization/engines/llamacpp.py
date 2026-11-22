@@ -95,6 +95,19 @@ def catalog(help_text: str, baseline: list[str], machine: dict, model_bytes: int
         lv.skip_reason = "baseline has no speculative draft source to sweep"
     levers.append(lv)
 
+    # 1b. adaptive draft length: stop drafting when the draft's own confidence falls below p-min. With partial acceptance a fixed
+    #     draft length wastes the drafted tail (each rejected draft token costs a draft step and verify width).
+    if has_flag(baseline, SPEC_FLAGS):
+        pv = [Variant(f"--spec-draft-p-min {p}", (lambda a, p=p: set_value(a, ("--spec-draft-p-min", "--draft-p-min"), p)))
+              for p in ("0.5", "0.7", "0.85")]
+        levers.append(need(Lever("speculative-confidence-cutoff", pv, True,
+                                 "draft only while the draft is confident; target verification keeps output identical"),
+                           "--spec-draft-p-min"))
+        # Draft-side sampling on the accelerator (a CPU sampler costs milliseconds per step).
+        levers.append(need(Lever("draft-backend-sampling",
+                                 [Variant("--spec-draft-backend-sampling", lambda a: set_bare(a, ("--spec-draft-backend-sampling",)))],
+                                 True, "draft sampling on the GPU backend"), "--spec-draft-backend-sampling"))
+
     # 2. flash attention
     if _flash_attn_takes_value(help_text):
         fa = [Variant("-fa on", lambda a: set_value(a, ("-fa", "--flash-attn"), "on")),
@@ -102,6 +115,10 @@ def catalog(help_text: str, baseline: list[str], machine: dict, model_bytes: int
     else:
         fa = [Variant("-fa on", lambda a: set_bare(a, ("-fa", "--flash-attn"))),
               Variant("-fa off", lambda a: drop(a, ("-fa", "--flash-attn"), takes_value=False))]
+    quant_v = next((baseline[i + 1] for i, x in enumerate(baseline[:-1]) if x in ("-ctv", "--cache-type-v")), "f16")
+    if quant_v not in ("f16", "f32", "bf16"):
+        # llama.cpp refuses a quantised V cache without flash attention ("quantized V cache requires flash_attn"): not a lever.
+        fa = [v for v in fa if not v.label.startswith("-fa off")]
     levers.append(need(Lever("flash-attention", fa, True, "numerically equivalent in theory; the equivalence gate verifies"), "-fa"))
 
     # 3. KV cache type (lossy, labelled)

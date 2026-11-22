@@ -233,3 +233,19 @@ class LaunchArgsTests(unittest.TestCase):
         self.assertEqual(prof.extra_args_to_write(launch + ["--spec-draft-n-max", "6"], launch), ["--spec-draft-n-max", "6"])
         changed = ["-fa", "on", "-ctk", "f16", "-ctv", "f16", "--cache-ram", "2048", "--spec-draft-n-max", "5"]
         self.assertEqual(prof.extra_args_to_write(changed, launch), changed)  # a changed launch flag is written whole (last value wins)
+
+
+class CatalogTests(unittest.TestCase):
+    HELP = ("-fa, --flash-attn [on|off|auto]\n-ctk, --cache-type-k TYPE\n-ctv, --cache-type-v TYPE\n--spec-draft-n-max N\n"
+            "--spec-draft-p-min, --draft-p-min P\n--spec-draft-backend-sampling, --no-spec-draft-backend-sampling\n-ub, --ubatch-size N\n")
+
+    def test_adaptive_draft_levers_appear_with_speculation_and_fa_off_is_skipped_with_quantised_v(self):
+        from ultra_inference_optimization.engines import llamacpp
+        base = ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "--spec-type", "draft-mtp", "--spec-draft-n-max", "5"]
+        names = {lv.name: lv for lv in llamacpp.catalog(self.HELP, base, {"perfCores": 6})}
+        self.assertIn("speculative-confidence-cutoff", names)
+        self.assertIsNone(names["speculative-confidence-cutoff"].skip_reason)
+        self.assertIn("draft-backend-sampling", names)
+        self.assertEqual([v.label for v in names["flash-attention"].variants], ["-fa on"])
+        no_spec = {lv.name for lv in llamacpp.catalog(self.HELP, ["-fa", "on"], {"perfCores": 6})}
+        self.assertNotIn("speculative-confidence-cutoff", no_spec)
