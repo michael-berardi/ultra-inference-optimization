@@ -117,6 +117,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def do_POST(self):
+        if self.path != "/v1/chat/completions":
+            # Strict like llama-server: a doubled /v1 or any other path is a 404 (0.1.0 shipped that bug past a lenient fake).
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         b = self.server.behavior
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         b.requests += 1

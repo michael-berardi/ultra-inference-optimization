@@ -72,3 +72,11 @@ class BenchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ServerRootTests(unittest.TestCase):
+    def test_root_and_v1_base_urls_resolve_to_the_same_server(self):
+        from ultra_inference_optimization import bench
+        for base in ("http://127.0.0.1:8089", "http://127.0.0.1:8089/", "http://127.0.0.1:8089/v1", "http://127.0.0.1:8089/v1/"):
+            with self.subTest(base=base):
+                self.assertEqual(bench.server_root(base), "http://127.0.0.1:8089")

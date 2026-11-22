@@ -105,8 +105,16 @@ def is_looping(text: str, threshold: float = 0.5) -> bool:
 
 
 # ---- one streaming request ----------------------------------------------------------
+def server_root(base_url: str) -> str:
+    """The server root. Accepts either the root or an OpenAI-style base URL ending in /v1 (what clients are usually given),
+    so /v1/chat/completions, /metrics, /tokenize and /health resolve the same way for both (0.1.0 doubled /v1 and every
+    request 404ed against a real llama-server)."""
+    root = base_url.rstrip("/")
+    return root[:-3] if root.endswith("/v1") else root
+
+
 def _conn(base_url: str, timeout: float):
-    u = urllib.parse.urlparse(base_url)
+    u = urllib.parse.urlparse(server_root(base_url))
     if u.scheme not in ("http", "https"):
         raise Refused("bad-url", f"unsupported base url {base_url!r}")
     cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
@@ -186,6 +194,7 @@ def stream_chat(base_url: str, user: str, max_tokens: int, system: str | None = 
 
 
 def get_text(base_url: str, path: str, timeout: float = 5.0) -> str | None:
+    base_url = server_root(base_url)
     conn, prefix = _conn(base_url, timeout)
     try:
         conn.request("GET", prefix + path)
