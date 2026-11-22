@@ -23,7 +23,7 @@ You improve how fast one local model server runs on one machine, and you prove e
    one change per experiment, control / candidate / control, accept only if the candidate beats both controls,
    the bootstrap 95% CI of the median ratio is above 1.0, and nothing else regresses by more than 3%.
    Winners must pass gates: needle retrieval at ~50% and ~100% of context, greedy equivalence for levers
-   claimed lossless, output sanity. Add `--apply` to write `bestArgs` into the profile (backup, atomic, 0600).
+   claimed lossless, output sanity. Add `--apply` to write the changed flags into the profile's extraArgs after a confirmation round reproduces the gain (backup, atomic, 0600); read `applied` in the result.
 5. `uio climb --metric-cmd "<prints a number>" --param NAME=a,b,c --apply-cmd "<cmd with {NAME}>"` for anything
    that is not an LLM server: same statistics, same ledger, same plateau rule.
 
@@ -34,7 +34,7 @@ You improve how fast one local model server runs on one machine, and you prove e
 - One change per experiment, derived from the current best. A lever the binary's `--help` does not list is skipped.
 - Lossy levers (for example a quantised KV cache) are labelled and only run with `--allow lossy`.
 - Do not benchmark on battery or in low-power mode; `uio` refuses and voids a run if that changes mid-run.
-- Plateau = three consecutive levers with no accepted win. Stop there and report the percentage of the ceiling reached.
+- Plateau = three consecutive levers whose every variant was noise. Stop there and report the percentage of the ceiling reached.
 - Exit codes: 0 ok, 2 refused (the `error` field names the cause), 3 failed.
 
 See `docs/METHOD.md` for the reasoning behind each rule.

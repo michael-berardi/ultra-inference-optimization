@@ -25,14 +25,17 @@ in one run make the result unattributable.
 ## 3. Controls
 
 Machines drift: thermals, background work, memory pressure. So each candidate is sandwiched: control, candidate,
-control, all on the same configuration of the rest. A candidate is only a win if it beats both neighbouring controls.
+control, all on the same configuration of the rest. A candidate is only a win if it beats both neighbouring controls and
+by more than the gap between those two controls.
 
 ## 4. Statistics
 
 - At least 6 samples per run; use the median, not the mean.
-- Bootstrap the ratio of medians (candidate over pooled controls). The 95% interval's lower bound must exceed 1.0, and
-  the point gain must clear a small minimum (default 2%) so statistically positive but useless changes do not pile up.
-- No other metric may regress by more than 3% (a drop counts when the interval says it is not noise).
+- Bootstrap the ratio of medians (candidate over pooled controls), resampling whole rounds and comparing each prompt with
+  itself. The 95% interval's lower bound must exceed 1.0, and the point gain must clear a small minimum (default 2%) and the
+  gap between the two controls, so statistically positive but useless changes do not pile up.
+- No other metric may be more than 3% worse (a point drop below 0.97 rejects on its own).
+- Before a result is applied, a fresh control/best/control/best round must reproduce the gain.
 
 ## 5. Honest measurement
 
@@ -62,7 +65,7 @@ Lossy changes (quantised KV, for instance) are labelled, opt-in, and still pass 
 
 ## 8. Plateau
 
-Work through levers ordered by typical payoff. Three consecutive levers with no accepted win is a plateau: stop,
+Work through levers ordered by typical payoff. Three consecutive levers whose every variant was noise is a plateau: stop,
 report the percentage of ceiling reached and what the remaining gap would need (a different model, quantisation,
 engine or hardware are outside a launch-flag search).
 

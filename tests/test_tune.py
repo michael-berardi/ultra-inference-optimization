@@ -230,9 +230,11 @@ class LaunchArgsTests(unittest.TestCase):
         launch = ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "2048"]
         p = {"source": {"path": "/m.gguf"}, "ctx": 4096, "extraArgs": ["--spec-draft-n-max", "5"], "launchArgs": launch}
         self.assertEqual(Engine().baseline_args(p), launch + ["--spec-draft-n-max", "5"])
-        self.assertEqual(prof.extra_args_to_write(launch + ["--spec-draft-n-max", "6"], launch), ["--spec-draft-n-max", "6"])
+        extra, cause, _d = prof.plan_write(launch + ["--spec-draft-n-max", "6"], launch)
+        self.assertEqual((extra, cause), (["--spec-draft-n-max", "6"], "ok"))
         changed = ["-fa", "on", "-ctk", "f16", "-ctv", "f16", "--cache-ram", "2048", "--spec-draft-n-max", "5"]
-        self.assertEqual(prof.extra_args_to_write(changed, launch), changed)  # a changed launch flag is written whole (last value wins)
+        extra, cause, _d = prof.plan_write(changed, launch)  # only the per-flag difference, never the whole launch set
+        self.assertEqual((extra, cause), (["-ctk", "f16", "-ctv", "f16", "--spec-draft-n-max", "5"], "ok"))
 
 
 class CatalogTests(unittest.TestCase):

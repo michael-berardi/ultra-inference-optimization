@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 
 from . import __version__, bench, ceiling, climb, gguf, probe, sysinfo
@@ -71,6 +72,19 @@ class _BenchFailed(Failed):
         self.payload = payload
 
 
+def parse_launch_args(text):
+    """--launch-args must be a JSON list of strings."""
+    if text is None:
+        return None
+    try:
+        val = json.loads(text)
+    except ValueError as e:
+        raise Refused("bad-launch-args", f"--launch-args is not valid JSON: {e}")
+    if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
+        raise Refused("bad-launch-args", "--launch-args must be a JSON list of strings")
+    return val
+
+
 def cmd_tune(a):
     from .tune import Tuner
     eng = get_engine(a.engine, binary=a.llama_server) if a.engine == "llama.cpp" else get_engine(a.engine)
@@ -78,7 +92,7 @@ def cmd_tune(a):
     t = Tuner(a.profile, eng, target=a.target, allow=a.allow, budget_s=parse_duration(a.budget),
               workdir=Path(a.workdir) if a.workdir else None, apply=a.apply, samples=a.samples,
               mem_cap_bytes=a.mem_cap_gb * 1024 ** 3 if a.mem_cap_gb else None, bandwidth_gbs=a.bandwidth,
-              min_gain=a.min_gain, gpu_busy_max=a.gpu_busy_max, launch_args=json.loads(a.launch_args) if a.launch_args else None)
+              min_gain=a.min_gain, gpu_busy_max=a.gpu_busy_max, launch_args=parse_launch_args(a.launch_args))
     return t.tune()
 
 
@@ -152,8 +166,22 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+class _Signalled(KeyboardInterrupt):
+    """SIGTERM / SIGHUP delivered as an exception so every `finally` (stopping the server, the lock) runs."""
+
+
+def _raise_signalled(signum, _frame):
+    raise _Signalled(f"signal {signum}")
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    old = {}
+    try:
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            old[sig] = signal.signal(sig, _raise_signalled)
+    except ValueError:  # not the main thread (embedded use): leave the handlers alone
+        old = {}
     try:
         emit(args.fn(args), args.human)
         return 0
@@ -163,6 +191,12 @@ def main(argv=None) -> int:
     except UioError as e:
         emit({"error": e.cause, "message": e.message}, args.human)
         return e.exit_code
-    except KeyboardInterrupt:
-        emit({"error": "interrupted", "message": "interrupted"}, args.human)
+    except KeyboardInterrupt as e:
+        emit({"error": "interrupted", "message": str(e) or "interrupted"}, args.human)
         return 3
+    except Exception as e:  # anything unexpected still ends as a JSON object and exit 3, with the cause
+        emit({"error": "unexpected", "message": f"{type(e).__name__}: {e}"}, args.human)
+        return 3
+    finally:
+        for sig, h in old.items():
+            signal.signal(sig, h)

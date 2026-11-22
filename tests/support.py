@@ -92,6 +92,9 @@ class FakeBehavior:
         self.greedy_suffix = ""
         self.requests = 0
         self.prompts = []
+        self.bodies = []
+        self.draft = None          # (drafted, accepted) reported in the final chunk's timings
+        self.reasoning_only = False  # every token arrives as reasoning_content, none as content
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -128,6 +131,7 @@ class _Handler(BaseHTTPRequestHandler):
         b.requests += 1
         prompt = body["messages"][-1]["content"]
         b.prompts.append(prompt)
+        b.bodies.append(body)
         if b.mode == "fail":
             self.send_response(500)
             self.send_header("Content-Length", "4")
@@ -142,7 +146,7 @@ class _Handler(BaseHTTPRequestHandler):
         m = re.search(r"vault passphrase is (\S+)", prompt)
         if m and "What is the vault passphrase" in prompt:
             toks = [m.group(1) if b.needle_ok else "unknown"]
-        elif body.get("temperature") == 0 and words < 30:
+        elif body.get("temperature") == 0 and words < 30 and body.get("max_tokens") == 48:
             toks = ["greedy-%d%s" % (words % 7, b.greedy_suffix), "text", "here"] * 5
         elif b.mode == "loop":
             toks = ["the", "same", "words", "again"] * 30
@@ -153,10 +157,12 @@ class _Handler(BaseHTTPRequestHandler):
         for i in range(0, len(toks), step):
             precise_sleep(b.tok_delay * step)
             piece = " ".join(toks[i:i + step]) + " "
-            self._chunk({"choices": [{"delta": {"content": piece}}]})
+            self._chunk({"choices": [{"delta": {("reasoning_content" if b.reasoning_only else "content"): piece}}]})
         final = {"choices": [{"delta": {}, "finish_reason": "length"}]}
         if b.mode != "nousage":
             final["usage"] = {"prompt_tokens": words, "completion_tokens": len(toks)}
+        if b.draft:
+            final["timings"] = {"draft_n": b.draft[0], "draft_n_accepted": b.draft[1]}
         self._chunk(final)
         self._chunk_raw(b"data: [DONE]\n\n")
         self.wfile.write(b"0\r\n\r\n")
@@ -186,8 +192,8 @@ class FakeServer:
 
 # ---- fake engine --------------------------------------------------------------------------
 class _FakeHandle(Server):
-    def __init__(self, fs):
-        self.fs, self.base_url, self.pid = fs, fs.base_url, None
+    def __init__(self, fs, pid=None):
+        self.fs, self.base_url, self.pid = fs, fs.base_url, pid
 
     def stop(self):
         self.fs.close()
@@ -197,7 +203,9 @@ class FakeEngine(Engine):
     """Speed and behaviour are pure functions of the argument list."""
     name = "fake"
 
-    def __init__(self, delay=None, needle_ok=None, greedy_suffix=None):
+    def __init__(self, delay=None, needle_ok=None, greedy_suffix=None, draft=None, reasoning_only=False, pid=None):
+        self.draft, self.reasoning_only, self.pid = draft, reasoning_only, pid
+        self.behaviors = []
         self.delay = delay or (lambda args: 0.001)
         self.needle_ok = needle_ok or (lambda args: True)
         self.greedy_suffix = greedy_suffix or (lambda args: "")
@@ -209,4 +217,6 @@ class FakeEngine(Engine):
         beh.tok_delay = self.delay(args)
         beh.needle_ok = self.needle_ok(args)
         beh.greedy_suffix = self.greedy_suffix(args)
-        return _FakeHandle(FakeServer(beh))
+        beh.draft, beh.reasoning_only = self.draft, self.reasoning_only
+        self.behaviors.append(beh)
+        return _FakeHandle(FakeServer(beh), self.pid)

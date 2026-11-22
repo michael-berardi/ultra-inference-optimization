@@ -65,26 +65,39 @@ def needle_gate(base_url: str, ctx: int, fractions=(0.5, 1.0), codes: int = 3, t
         for _ in range(codes):
             code = f"{rng.choice(WORDS)}-{secrets.randbelow(9000) + 1000}"
             prompt = make_needle_prompt(rng, words, code)
-            r = stream_chat(base_url, prompt, 24, temperature=0.0, seed=1, timeout=timeout)
-            got = _norm(r["text"]) if r["ok"] else None
+            r = stream_chat(base_url, prompt, 24, temperature=0.0, seed=1, timeout=timeout, no_think=True)
+            # An answer that arrives in the reasoning channel still counts; an empty answer never does.
+            got = _norm(r["text"] or r["reasoning"]) if r["ok"] else None
             results.append({"fraction": frac, "promptTokens": r["promptTokens"], "ok": r["ok"],
-                            "exact": bool(r["ok"] and got.lower() == code.lower()), "error": r["error"],
+                            "exact": bool(r["ok"] and got and got.lower() == code.lower()), "error": r["error"],
                             "expected": code, "got": got})
-    return {"passed": all(x["exact"] for x in results), "trials": results}
+    exact = sum(1 for x in results if x["exact"])
+    return {"passed": exact == len(results), "trials": results, "exact": exact, "total": len(results),
+            "score": exact / len(results) if results else 0.0}
+
+
+def needle_no_worse(cand: dict, baseline: dict | None) -> bool:
+    """The needle gate is relative: the candidate may not retrieve fewer planted values than the unchanged baseline did.
+    Without a usable baseline measurement it must pass outright."""
+    if not cand.get("trials"):
+        return False
+    if not baseline or not baseline.get("trials"):
+        return bool(cand.get("passed"))
+    return cand.get("score", 0.0) >= baseline.get("score", 0.0)
 
 
 def greedy_outputs(base_url: str, max_tokens: int = 48, timeout: float = 300.0) -> list[str | None]:
     out = []
     for p in GREEDY_PROMPTS:
-        r = stream_chat(base_url, p, max_tokens, temperature=0.0, seed=1, timeout=timeout)
-        out.append(r["text"] if r["ok"] else None)
+        r = stream_chat(base_url, p, max_tokens, temperature=0.0, seed=1, timeout=timeout, no_think=True)
+        out.append((r["reasoning"] + r["text"]) if r["ok"] else None)
     return out
 
 
 def compare_greedy(a: list[str | None], b: list[str | None]) -> dict:
     for i, (x, y) in enumerate(zip(a, b)):
-        if x is None or y is None:
-            return {"equal": False, "firstDivergence": {"prompt": i, "char": 0, "reason": "request failed"}}
+        if x is None or y is None or not x.strip() or not y.strip():
+            return {"equal": False, "firstDivergence": {"prompt": i, "char": 0, "reason": "request failed or empty output"}}
         if x != y:
             j = next((k for k, (cx, cy) in enumerate(zip(x, y)) if cx != cy), min(len(x), len(y)))
             return {"equal": False, "firstDivergence": {"prompt": i, "char": j, "control": x[j:j + 24], "candidate": y[j:j + 24]}}

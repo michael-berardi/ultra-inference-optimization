@@ -46,6 +46,8 @@ def write_json(path: Path, obj, mode: int | None = None) -> None:
     with os.fdopen(fd, "w") as fh:
         json.dump(obj, fh, indent=2, sort_keys=False)
         fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())  # the bytes are on disk before the rename makes them the file
     if mode is not None:
         os.chmod(tmp, mode)
     os.replace(tmp, path)

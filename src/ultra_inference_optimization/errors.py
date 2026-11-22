@@ -16,3 +16,8 @@ class Refused(UioError):
 
 class Failed(UioError):
     exit_code = 3
+
+
+class BudgetExceeded(UioError):
+    """The time budget ended inside a run; the run is discarded."""
+    exit_code = 3

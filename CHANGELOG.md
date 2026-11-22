@@ -10,6 +10,26 @@ First release. Tested against a real llama.cpp server before release, which foun
 - `--launch-args` measures the flags a model manager adds at launch, so the baseline is the server really in use;
 - adaptive draft cutoff and draft backend sampling levers; `-fa off` is skipped with a quantised V cache.
 
+Review fixes, before release:
+- result contract v2: `applied` is always present (`written`, exact `extraArgs`, `backup`, `reason`), plus `confirmation`,
+  `percentOfCeiling` (speculative ceiling when acceptance was measured) and `stoppedBecause`;
+- statistics: a gain must exceed the gap between its two controls; the bootstrap resamples whole rounds and compares each
+  prompt with itself; a confirmation round (control/best/control/best) must reproduce the gain before `--apply`;
+  decode is benchmarked at temperature 0 with a seed; a single control exits early only when worse by more than 3x the
+  control gap; plateau counts only levers whose every variant was noise; a non-target drop below 0.97 rejects on its own;
+  no-op candidates are detected on normalised flag maps;
+- apply: only the per-flag difference from the launch flags is written and verified; refuses on a removed launch flag or a
+  repeatable flag (`launch-flag-removed`), on a profile edited during the run (`profile-changed`), writes an fsynced temp file,
+  unique backup names;
+- safety: SIGTERM/SIGHUP run the cleanup; the server PID and start time are recorded and a stale one is reaped by the next run;
+  the memory watchdog starts at spawn and also watches system free memory, peak recorded in the ledger;
+  the time budget is checked inside rounds and gates;
+- gates: thinking disabled per request, reasoning text counted, empty output fails, needle gate is no worse than the baseline;
+- hostile GGUF input (wrong types, layer count over 4096, nesting over 2, bad alignment, oversized counts) fails with a named cause;
+- any unexpected exception exits 3 with the cause; `--launch-args` must be a JSON list of strings;
+- `install.sh` refuses outside a checkout and installs a fixed launcher run by the absolute python3 with `-I`; the README
+  install section uses the pinned release URL; the neutrality scan covers `tests/`.
+
 ## 0.1.0-pre
 
 First release.

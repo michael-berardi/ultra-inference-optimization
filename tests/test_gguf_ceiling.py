@@ -34,7 +34,7 @@ class GgufTests(unittest.TestCase):
         self.assertEqual(gguf.read_gguf(str(self.path)).attention_layers, [0, 1, 2, 3])
 
     def test_fused_qkv_linear_attention_with_ssm_state_keeps_no_kv(self):
-        # Real hybrid layout (Qwen3.5-style): linear-attention layers carry a fused attn_qkv beside ssm_* state; only the full
+        # Real hybrid layout: linear-attention layers carry a fused attn_qkv beside ssm_* state; only the full
         # attention layers keep KV. The first version counted every layer as KV (65 vs 17), a 3.8x KV error.
         from support import write_gguf
         F32 = 0

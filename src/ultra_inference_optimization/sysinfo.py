@@ -115,26 +115,42 @@ def process_memory_bytes(pid: int) -> int | None:
 
 
 class MemoryWatchdog:
-    """Polls one PID's memory; calls `on_trip` once if it exceeds the cap."""
+    """Polls one PID's memory and the machine's free memory; calls `on_trip` once if the PID exceeds the cap or free memory
+    drops below `min_free_bytes`. Starts the moment it is entered (the tuner enters it right after the process is spawned,
+    before the model finishes loading). `peak` and `min_free` are what was seen, for the ledger."""
 
-    def __init__(self, pid: int, cap_bytes: float, on_trip, interval: float = 2.0, reader=None):
+    def __init__(self, pid: int, cap_bytes: float | None, on_trip, interval: float = 2.0, reader=None,
+                 min_free_bytes: float | None = None, free_reader=None):
         self.pid, self.cap, self.on_trip, self.interval = pid, cap_bytes, on_trip, interval
         self.reader = reader or process_memory_bytes
+        self.min_free_bytes = min_free_bytes
+        self.free_reader = free_reader or free_memory_bytes
         self.tripped = False
+        self.reason = None
         self.peak = 0
+        self.min_free = None
         self._stop = threading.Event()
         self._t = threading.Thread(target=self._loop, daemon=True)
 
+    def _trip(self, reason: str):
+        self.tripped, self.reason = True, reason
+        self.on_trip()
+
     def _loop(self):
-        while not self._stop.wait(self.interval):
+        while True:
             v = self.reader(self.pid)
-            if v is None:
-                continue
-            self.peak = max(self.peak, v)
-            if v > self.cap:
-                self.tripped = True
-                self.on_trip()
-                break
+            if v is not None:
+                self.peak = max(self.peak, v)
+                if self.cap is not None and v > self.cap:
+                    return self._trip(f"process memory {v} above cap {self.cap:.0f}")
+            if self.min_free_bytes is not None:
+                f = self.free_reader()
+                if f is not None:
+                    self.min_free = f if self.min_free is None else min(self.min_free, f)
+                    if f < self.min_free_bytes:
+                        return self._trip(f"system free memory {f} below {self.min_free_bytes:.0f}")
+            if self._stop.wait(self.interval):
+                return
 
     def __enter__(self):
         self._t.start()

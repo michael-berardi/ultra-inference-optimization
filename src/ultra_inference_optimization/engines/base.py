@@ -38,6 +38,7 @@ class Server:
 
 class Engine:
     name = "engine"
+    spawn_hook = None  # callable(server) invoked right after the process is spawned, before it is healthy
 
     def info(self) -> dict:
         raise NotImplementedError

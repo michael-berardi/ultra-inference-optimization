@@ -10,11 +10,17 @@ from .errors import Failed
 
 _SCALARS = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
 _MAX_ARRAY_KEEP = 4096  # big arrays (vocab) are skipped, not stored
+_MAX_LAYERS = 4096
+_MAX_DEPTH = 2          # arrays of arrays: at most this many levels
+_SIZES = {t: struct.calcsize(f) for t, f in _SCALARS.items()}
 
 
 class _Reader:
-    def __init__(self, fh):
-        self.fh = fh
+    def __init__(self, fh, size: int = 1 << 62):
+        self.fh, self.size = fh, size
+
+    def remaining(self) -> int:
+        return self.size - self.fh.tell()
 
     def read(self, n: int) -> bytes:
         b = self.fh.read(n)
@@ -31,22 +37,36 @@ class _Reader:
             raise Failed("gguf-corrupt", f"implausible string length {n}")
         return self.read(n).decode("utf-8", "replace")
 
-    def value(self, t: int):
+    def value(self, t: int, depth: int = 0):
         if t in _SCALARS:
             return self.unpack(_SCALARS[t])
         if t == 8:
             return self.string()
         if t == 9:
+            if depth >= _MAX_DEPTH:
+                raise Failed("gguf-corrupt", f"arrays nested deeper than {_MAX_DEPTH}")
             et = self.unpack("<I")
+            if et not in _SCALARS and et not in (8, 9):
+                raise Failed("gguf-corrupt", f"unknown array element type {et}")
             n = self.unpack("<Q")
+            # every element takes at least this many bytes: a count the file cannot hold is corrupt (and would spin for ever)
+            if n * _SIZES.get(et, 8 if et == 8 else 12) > self.remaining():
+                raise Failed("gguf-truncated", f"array of {n} elements does not fit in the file")
             keep = n <= _MAX_ARRAY_KEEP
             out = []
             for _ in range(n):
-                v = self.value(et)
+                v = self.value(et, depth + 1)
                 if keep:
                     out.append(v)
             return out if keep else {"arrayLength": n}
         raise Failed("gguf-corrupt", f"unknown metadata value type {t}")
+
+
+def _int(v, what: str) -> int:
+    """A header number must be a real integer; a string, float, list or bool there is a corrupt or hostile file."""
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise Failed("gguf-corrupt", f"{what} must be an integer, got {type(v).__name__}")
+    return v
 
 
 @dataclass
@@ -84,20 +104,26 @@ class GGUF:
 
     @property
     def n_layer(self) -> int:
-        return int(self.key("block_count", 0))
+        n = _int(self.key("block_count", 0), "block_count")
+        if not 0 <= n <= _MAX_LAYERS:
+            raise Failed("gguf-corrupt", f"implausible layer count {n}")
+        return n
 
     @property
     def n_embd(self) -> int:
-        return int(self.key("embedding_length", 0))
+        return _int(self.key("embedding_length", 0), "embedding_length")
 
     def _per_layer(self, suffix: str, default: int) -> list[int]:
         v = self.key(suffix)
         n = self.n_layer
         if isinstance(v, list):
-            return [int(x) for x in v][:n] + [int(v[-1])] * max(0, n - len(v)) if v else [default] * n
+            vals = [_int(x, suffix) for x in v]
+            return vals[:n] + [vals[-1]] * max(0, n - len(vals)) if vals else [default] * n
         if v is None:
             return [default] * n
-        return [int(v)] * n
+        if isinstance(v, dict):
+            raise Failed("gguf-corrupt", f"{suffix} is an oversized array")
+        return [_int(v, suffix)] * n
 
     @property
     def head_counts(self) -> list[int]:
@@ -137,8 +163,11 @@ class GGUF:
     @property
     def draft_layer_bytes(self) -> int:
         """Bytes of a built-in multi-token-prediction (MTP / nextn) draft layer, read on every draft step."""
-        layers = {int(t.name.split(".")[1]) for t in self.tensors if t.name.startswith("blk.") and ".nextn." in t.name}
-        return sum(t.nbytes for t in self.tensors if t.name.startswith("blk.") and int(t.name.split(".")[1]) in layers)
+        def layer_of(t):
+            parts = t.name.split(".")
+            return int(parts[1]) if t.name.startswith("blk.") and len(parts) > 2 and parts[1].isdigit() else None
+        layers = {layer_of(t) for t in self.tensors if ".nextn." in t.name} - {None}
+        return sum(t.nbytes for t in self.tensors if layer_of(t) in layers)
 
     @property
     def output_head_bytes(self) -> int:
@@ -148,7 +177,8 @@ class GGUF:
     def head_dims(self) -> tuple[int, int]:
         heads = max(self.head_counts or [0])
         default = self.n_embd // heads if heads else 0
-        return int(self.key("attention.key_length", default)), int(self.key("attention.value_length", default))
+        return (_int(self.key("attention.key_length", default), "key_length"),
+                _int(self.key("attention.value_length", default), "value_length"))
 
     @property
     def total_tensor_bytes(self) -> int:
@@ -156,11 +186,11 @@ class GGUF:
 
     @property
     def expert_count(self) -> int:
-        return int(self.key("expert_count", 0) or 0)
+        return _int(self.key("expert_count", 0) or 0, "expert_count")
 
     @property
     def expert_used(self) -> int:
-        return int(self.key("expert_used_count", 0) or 0)
+        return _int(self.key("expert_used_count", 0) or 0, "expert_used_count")
 
     def summary(self) -> dict:
         kd, vd = self.head_dims
@@ -180,13 +210,27 @@ class GGUF:
 
 
 def read_gguf(path: str) -> GGUF:
+    """Parse a header. Any malformed or hostile content surfaces as Failed, never as a stray exception or a hang."""
+    try:
+        g = _read_gguf(path)
+        # Touch every derived number now so a bad type fails here, with a name, and not later inside the ceiling arithmetic.
+        _ = (g.n_layer, g.n_embd, g.head_counts, g.kv_head_counts, g.head_dims, g.expert_count, g.expert_used,
+             g.attention_layers)
+        return g
+    except Failed:
+        raise
+    except (struct.error, ValueError, TypeError, OverflowError, RecursionError, MemoryError, IndexError, KeyError) as e:
+        raise Failed("gguf-corrupt", f"malformed header: {type(e).__name__}: {e}")
+
+
+def _read_gguf(path: str) -> GGUF:
     try:
         size = os.path.getsize(path)
         fh = open(path, "rb")
     except OSError as e:
         raise Failed("gguf-unreadable", str(e))
     with fh:
-        r = _Reader(fh)
+        r = _Reader(fh, size)
         if r.read(4) != b"GGUF":
             raise Failed("gguf-bad-magic", f"{path} is not a GGUF file")
         version = r.unpack("<I")
@@ -197,6 +241,8 @@ def read_gguf(path: str) -> GGUF:
         if n_tensors > 1 << 24 or n_kv > 1 << 20:
             raise Failed("gguf-corrupt", "implausible counts in header")
         meta: dict = {}
+        if n_tensors * 24 > size or n_kv * 12 > size:
+            raise Failed("gguf-truncated", "header counts do not fit in the file")
         for _ in range(n_kv):
             k = r.string()
             t = r.unpack("<I")
@@ -212,7 +258,9 @@ def read_gguf(path: str) -> GGUF:
             off = r.unpack("<Q")
             tensors.append(Tensor(name, dims, gt, off))
         header_end = fh.tell()
-    align = int(meta.get("general.alignment", 32) or 32)
+    align = meta.get("general.alignment", 32)
+    if isinstance(align, bool) or not isinstance(align, int) or not 0 < align <= 1 << 20:
+        raise Failed("gguf-corrupt", f"general.alignment must be a positive integer, got {align!r}")
     data_start = (header_end + align - 1) // align * align
     order = sorted(tensors, key=lambda t: t.offset)
     for i, t in enumerate(order):

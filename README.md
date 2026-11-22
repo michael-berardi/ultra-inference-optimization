@@ -8,10 +8,21 @@ Inspired by the MIT-licensed `inference-optimisation` agent skill; this is an in
 
 ## Install
 
+Pinned release (works without a checkout):
+
+```sh
+uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.0"
+# or: pipx install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.0"
+```
+
+From a checkout:
+
 ```sh
 sh install.sh            # ~/.local/share/uio/<version> + shim ~/.local/bin/uio (refuses to overwrite a foreign uio)
-# or: pipx install .   /   uv tool install .
 ```
+
+`install.sh` refuses to run unless it sits in a checkout (it copies the tree next to it); piping it from a URL is refused.
+The shim runs a fixed launcher file under the absolute `python3` found at install time, in isolated mode (`-I`).
 
 ## Commands
 
@@ -26,36 +37,59 @@ Every command prints one JSON object on stdout (`--human` for text). Exit codes:
 | `uio climb --metric-cmd C --param NAME=v1,v2 --apply-cmd C` | the same statistics for any numeric metric |
 
 `tune` reads a local profile JSON with `source.path` (model file), `ctx`, `extraArgs` (the baseline) and optionally `port`.
-`--apply` rewrites only `extraArgs`, with a timestamped backup, an atomic replace and mode 0600, and only when every gate passed.
+`--apply` rewrites only `extraArgs`, with a unique timestamped backup, an fsynced temp file, an atomic replace and mode 0600, and
+only when every gate passed **and** a confirmation round reproduced the gain (see Guarantees). The result JSON always carries
+`applied` (`written`, the exact `extraArgs` written, `backup`, and a `reason` when nothing was written, for example
+`confirmation-failed`, `profile-changed` or `launch-flag-removed`). Only the per-flag difference from the launch flags is
+written; a removed launch flag or a repeatable flag such as `--lora-scaled` refuses the write.
 
 Method: see [docs/METHOD.md](docs/METHOD.md). Agent skill: [SKILL.md](SKILL.md).
 
 ## A real run
 
-A 27B hybrid model (17 of 65 layers with attention, built-in MTP draft head), 3-bit GGUF, llama.cpp, Apple M5 Max:
+One real tune (`--budget 90m`, decode target), a hybrid model (17 of 65 layers with attention, built-in MTP draft head) as a
+12.1 GB GGUF, llama.cpp, Apple M5 Max with 546 GB/s measured memory bandwidth. The numbers below are from that run's
+`PLAN.md` and `ledger.jsonl`:
 
 | | value |
 | --- | --- |
-| baseline decode (median of 18) | 49-50 tok/s |
-| prefill | ~400 tok/s |
-| draft acceptance on the mixed prompt panel | 0.51 |
-| ceiling, weights only (546 GB/s) | 46.8 tok/s |
-| ceiling with the measured acceptance | 63.9 tok/s |
-| levers tried | draft length 2-16 and off, confidence cutoff 0.5-0.85, draft backend sampling, flash attention, ubatch 256-2048 |
-| accepted | none: the hand-tuned launch flags were already the best measured; speculation off halves decode |
+| baseline (the profile's launch flags plus extra args) | decode 49.0 tok/s, prefill 396.9 tok/s, TTFT 2938 ms |
+| a second run of the same baseline (control #11) | decode 50.7 tok/s |
+| draft acceptance at the launch configuration | 0.57 (baseline), 0.60 (control) |
+| draft acceptance across the draft-length sweep | 0.26 (16 drafted) to 0.80 (2 drafted); 0.74-0.90 with a confidence cutoff of 0.5-0.85 |
+| ceiling, weights only (546 GB/s) | 46.8 tok/s (the speculative ceiling was not computed in that run) |
+| levers reached | draft-length sweep (2, 3, 4, 6, 8, 12, 16 and speculation off), confidence cutoff (0.5, 0.7, 0.85), draft backend sampling |
+| not reached | flash attention and ubatch size: the run stopped at the plateau rule after those three levers |
+| accepted | none; every variant was equal to or worse than the baseline, and speculation off halved decode (24.3 tok/s) |
 
-The useful result is the negative one: the remaining gap to the ceiling is draft acceptance (content dependent), not a flag.
-The first version of the ceiling also counted all 65 layers as KV layers and the MTP head as a per-token weight; the
-fixed reader takes both from the file (`attention.recurrent_layers`, `nextn` tensors).
+The useful result is the negative one: the launch flags were already the best of the levers tried, and the remaining gap to
+the ceiling is draft acceptance (content dependent), not a flag. Two runs of the identical baseline differed by 3%, which is
+why a gain must exceed the gap between its own two controls. That run used the earlier statistics (flat bootstrap, no
+confirmation round, no baseline-relative needle gate); the rules below are what 0.1.0 now does.
 
 ## Guarantees
 
 - Tokens are counted from the server's `usage`, never from stream chunks.
 - Each request carries a fresh random prefix, so prefix caches cannot flatter the numbers.
-- A change is kept only if it beats both neighbouring controls, the bootstrap 95% CI of the median ratio is above 1.0,
-  and nothing else regresses by more than 3%.
-- Tuning refuses on battery or in low-power mode, voids a run if that changes, kills the server at a memory cap,
-  and holds an exclusive lock at `~/.cache/uio/lock`.
+- A change is kept only if it beats both neighbouring controls, its gain exceeds the gap between those two controls (the
+  run-to-run drift of an unchanged config), the bootstrap 95% CI of the ratio is above 1.0 (whole rounds are resampled and
+  each prompt is compared with itself), the gain is at least the minimum (2%), and no other metric is more than 3% worse
+  (a point drop below 0.97 rejects on its own).
+- A single control ends an experiment early only when the candidate is worse by more than 3x the control gap seen so far.
+- Plateau means three consecutive levers whose every variant was indistinguishable from noise.
+- Decode is benchmarked at temperature 0 with a fixed seed; every prompt keeps its unique random prefix.
+- Gates ask the server not to think (`chat_template_kwargs` `enable_thinking: false` and `reasoning_format: none`), count
+  reasoning text if it arrives anyway, and treat empty output as a failure. The needle gate is "no worse than the unchanged
+  baseline", which is needle-tested once at the start.
+- Before `--apply`, a confirmation round (baseline, best, baseline, best, run after the climb and outside its time budget)
+  must reproduce the gain with the same rules, or nothing is written. When it runs, `baseline` and `best` in the result are
+  the confirmation numbers.
+- `percentOfCeiling` is best decode over the speculative ceiling when draft acceptance was measured (and the draft length is
+  known), else over the weights-only ceiling.
+- Tuning refuses on battery or in low-power mode, voids a run if that changes, kills the server at a memory cap or when
+  system free memory runs out (watched from the moment the process spawns; the peak is recorded in the ledger), and holds an
+  exclusive lock at `~/.cache/uio/lock`. SIGTERM and SIGHUP stop the server cleanly; a server left behind by a hard kill is
+  found by PID and start time and stopped by the next run.
 - The tool ships no model id, publisher, repository or quantisation default.
 
 ## Tests

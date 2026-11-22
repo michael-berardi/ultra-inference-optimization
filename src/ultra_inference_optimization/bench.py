@@ -17,8 +17,8 @@ import re
 import time
 import urllib.parse
 
-from .errors import Failed, Refused
-from .stats import median
+from .errors import BudgetExceeded, Failed, Refused
+from .stats import Tagged, median
 
 WORDS = ("amber anchor basin birch bridge candle canyon cedar chalk cinder clover copper coral crest dune "
          "ember falcon fern field flint forest garnet glacier harbor hazel heron hollow indigo island ivory "
@@ -122,13 +122,19 @@ def _conn(base_url: str, timeout: float):
 
 
 def stream_chat(base_url: str, user: str, max_tokens: int, system: str | None = None,
-                temperature: float = 0.7, seed: int | None = None, timeout: float = 600.0) -> dict:
+                temperature: float = 0.7, seed: int | None = None, timeout: float = 600.0,
+                no_think: bool = False) -> dict:
+    """`no_think` asks the server not to produce a reasoning section (template kwarg and reasoning_format), for gates that
+    compare answers. Whatever reasoning text still arrives is returned separately in `reasoning` and never discarded."""
     messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": user}]
     body = {"messages": messages, "max_tokens": max_tokens, "stream": True,
             "stream_options": {"include_usage": True}, "temperature": temperature}
     if seed is not None:
         body["seed"] = seed
-    res = {"ok": False, "error": None, "text": "", "completionTokens": None, "promptTokens": None,
+    if no_think:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+        body["reasoning_format"] = "none"
+    res = {"ok": False, "error": None, "text": "", "reasoning": "", "completionTokens": None, "promptTokens": None,
            "ttftS": None, "decodeS": None, "timings": None, "chunks": 0}
     conn, prefix = _conn(base_url, timeout)
     try:
@@ -140,7 +146,7 @@ def stream_chat(base_url: str, user: str, max_tokens: int, system: str | None = 
             res["error"] = f"http-{resp.status}: {resp.read(300).decode('utf-8', 'replace')}"
             return res
         t_first = None
-        text = []
+        text, think_parts = [], []
         usage = None
         while True:
             line = resp.readline()
@@ -172,8 +178,10 @@ def stream_chat(base_url: str, user: str, max_tokens: int, system: str | None = 
                     if t_first is None:
                         t_first = time.perf_counter()
                     text.append(piece)
+                    think_parts.append(think)
         t_end = time.perf_counter()
         res["text"] = "".join(text)
+        res["reasoning"] = "".join(think_parts)
         if usage is None or usage.get("completion_tokens") is None:
             res["error"] = "no-usage: server did not return stream usage; chunk counts are never used as token counts"
             return res
@@ -232,7 +240,8 @@ def _round(x, n=3):
 
 
 def run_bench(base_url: str, samples: int = 6, panel: list[dict] | None = None, seed: int = 1,
-              long_context: bool = False, timeout: float = 600.0, min_samples: int = 6) -> dict:
+              long_context: bool = False, timeout: float = 600.0, min_samples: int = 6,
+              deadline: float | None = None) -> dict:
     if samples < min_samples:
         raise Refused("too-few-samples", f"need >= {min_samples} samples for a median, got {samples}")
     panel = panel or build_panel(seed, long_context)
@@ -240,8 +249,14 @@ def run_bench(base_url: str, samples: int = 6, panel: list[dict] | None = None, 
     plan = [(i, e, unique_prefix() + e["user"]) for i in range(samples) for e in panel]
     before = scrape_draft_counters(base_url)
     rows = []
+    last_round = -1
     for rnd, e, user in plan:
-        r = stream_chat(base_url, user, e["max_tokens"], system=e.get("system"), timeout=timeout)
+        if deadline is not None and rnd != last_round and time.monotonic() > deadline:
+            raise BudgetExceeded("budget", f"time budget ended before round {rnd + 1} of {samples}")
+        last_round = rnd
+        # Greedy with a fixed seed: decode speed must not depend on sampling luck (the unique prefix keeps caches cold).
+        r = stream_chat(base_url, user, e["max_tokens"], system=e.get("system"), temperature=0.0, seed=seed,
+                        timeout=timeout)
         row = {"round": rnd, "name": e["name"], "kind": e["kind"], "ok": r["ok"], "error": r["error"],
                "promptTokens": r["promptTokens"], "completionTokens": r["completionTokens"],
                "ttftMs": _round(r["ttftS"] * 1000, 2) if r["ttftS"] is not None else None,
@@ -254,6 +269,8 @@ def run_bench(base_url: str, samples: int = 6, panel: list[dict] | None = None, 
                 row["prefillTokS"] = round(r["promptTokens"] / r["ttftS"], 3)
             row["looping"] = is_looping(r["text"])
             row["emptyOutput"] = (ct == 0)
+            if not (r["text"] or r["reasoning"]).strip() and e["kind"] == "decode":
+                row["emptyOutput"] = True
             t = r["timings"] or {}
             if t.get("draft_n"):
                 row["draftN"], row["draftAccepted"] = t["draft_n"], t.get("draft_n_accepted", 0)
@@ -284,11 +301,20 @@ def run_bench(base_url: str, samples: int = 6, panel: list[dict] | None = None, 
     return {"decodeTokS": agg(dec), "prefillTokS": agg(pre), "ttftMs": agg(ttft),
             "draftAcceptance": _round(acc, 4), "flags": flags,
             "panel": {"seed": seed, "entries": [e["name"] for e in panel], "rounds": samples,
-                      "uniquePrefixPerRequest": True, "requests": len(rows), "failures": sum(not r["ok"] for r in rows)},
+                      "uniquePrefixPerRequest": True, "temperature": 0.0, "requests": len(rows), "failures": sum(not r["ok"] for r in rows)},
             "perSample": rows}
 
 
 def metrics_of(result: dict) -> dict:
-    """Sample lists keyed by the statistic names used by the climbing code."""
-    return {"decode": result["decodeTokS"]["samples"], "prefill": result["prefillTokS"]["samples"],
-            "ttft": result["ttftMs"]["samples"]}
+    """Sample lists keyed by the statistic names used by the climbing code. Each value remembers its round and prompt so the
+    bootstrap can resample whole rounds and compare a prompt with itself."""
+    out = {"decode": Tagged(), "prefill": Tagged(), "ttft": Tagged()}
+    for r in result.get("perSample", []):
+        for key, col in (("decode", "decodeTokS"), ("prefill", "prefillTokS")):
+            if r.get(col) is not None:
+                out[key].append(r[col])
+                out[key].tags.append((r["round"], r["name"]))
+        if r["kind"] == "prefill" and r.get("ttftMs") is not None:
+            out["ttft"].append(r["ttftMs"])
+            out["ttft"].tags.append((r["round"], r["name"]))
+    return out

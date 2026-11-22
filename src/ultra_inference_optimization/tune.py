@@ -5,15 +5,17 @@ import itertools
 import time
 from pathlib import Path
 
-from . import bench, ceiling, experiment, gates, gguf, probe, profile, sysinfo
+from . import argmap, bench, ceiling, experiment, gates, gguf, probe, profile, reaper, sysinfo
 from .engines import Engine
-from .errors import Failed, Refused, UioError
-from .experiment import METRIC_DIRECTION, TARGETS, decide, summarize
+from .errors import BudgetExceeded, Failed, Refused, UioError
+from .experiment import METRIC_DIRECTION, TARGETS, control_gap, decide, pool, summarize
 from .lock import RunLock
 from .stats import median, point_ratio
 from .util import append_jsonl, append_text, log, now_iso, stamp, uio_home, write_json
 
 GIB = 1024 ** 3
+MIB = 1024 ** 2
+EARLY_EXIT_GAPS = 3.0  # a lone control may end an experiment early only when the candidate is worse by > 3x the control gap
 PLATEAU_LEVERS = 3
 
 
@@ -32,6 +34,9 @@ class Run:
         self.flags: list = []
         self.finished = time.monotonic()
         self.watchdog = False
+        self.needle = None
+        self.peak = 0
+        self.min_free = None
 
 
 class Tuner:
@@ -39,8 +44,13 @@ class Tuner:
                  workdir: Path | None = None, apply=False, samples=6, min_gain=experiment.MIN_GAIN,
                  mem_cap_bytes: float | None = None, bandwidth_gbs: float | None = None,
                  headroom_bytes: int = 2 * GIB, levers=None, preflight=True, seed=1, control_max_age_s=900.0,
-                 gpu_busy_max: float = 60.0, launch_args: list[str] | None = None):
+                 gpu_busy_max: float = 60.0, launch_args: list[str] | None = None,
+                 min_free_bytes: float = 512 * MIB):
         self.gpu_busy_max = gpu_busy_max
+        self.min_free_bytes = min_free_bytes
+        self.deadline = None
+        self.control_gap_seen = None
+        self.baseline_needle = None
         self.launch_args = list(launch_args or [])
         self.gpu_background = None
         if target not in TARGETS:
@@ -61,6 +71,7 @@ class Tuner:
         self.profile = profile.load_profile(profile_path)
         if launch_args:
             self.profile = {**self.profile, "launchArgs": list(launch_args)}
+        self.extra_before = list(self.profile.get("extraArgs") or [])  # what the file said when the run started
         self.ledger = self.workdir / "ledger.jsonl"
         self.plan = self.workdir / "PLAN.md"
         self.env0 = None
@@ -100,7 +111,9 @@ class Tuner:
         guard = [(n, METRIC_DIRECTION[n]) for n in names if n not in [t[0] for t in target]]
         return target, guard
 
-    def run_config(self, args, role, lever=None, variant=None, needle=False, needle_only=False) -> Run:
+    def run_config(self, args, role, lever=None, variant=None, needle=False, needle_only=False, budgeted=True) -> Run:
+        if budgeted and self.deadline is not None and time.monotonic() >= self.deadline:
+            raise BudgetExceeded("budget", "time budget ended")
         rid = next(self.ids)
         run = Run(rid, role, args)
         write_json(self.workdir / "configs" / f"{rid:03d}-{role}.json",
@@ -110,37 +123,52 @@ class Tuner:
         port = sysinfo.free_port()
         log_path = self.workdir / "logs" / f"{rid:03d}-{role}.log"
         server = None
+        wd = None
         t0 = time.monotonic()
+
+        def spawned(srv):
+            """Called the moment the process exists (before the model has loaded): record it and start the watchdog."""
+            nonlocal server, wd
+            if server is not None:
+                return
+            server = srv
+            if srv.pid:
+                reaper.record(srv.pid, self.workdir)
+                wd = sysinfo.MemoryWatchdog(srv.pid, self.mem_cap, srv.kill_for_watchdog, min_free_bytes=self.min_free_bytes)
+                wd.__enter__()
+
+        self.engine.spawn_hook = spawned
         try:
-            server = self.engine.start(self.profile, args, port, log_path)
-            wd = sysinfo.MemoryWatchdog(server.pid, self.mem_cap, server.kill_for_watchdog) if (server.pid and self.mem_cap) else None
-            try:
-                if wd:
-                    wd.__enter__()
-                bench.stream_chat(server.base_url, bench.unique_prefix() + "Say hello.", 8, timeout=900)  # warmup, unrecorded
-                if not needle_only:
-                    res = bench.run_bench(server.base_url, self.samples, bench.build_panel(self.seed), self.seed)
-                    run.result, run.metrics, run.flags = res, bench.metrics_of(res), res["flags"]
-                    run.greedy = gates.greedy_outputs(server.base_url)
-                if needle:
-                    run.needle = gates.needle_gate(server.base_url, self.profile["ctx"])
-            finally:
-                if wd:
-                    wd.__exit__(None, None, None)
-                    run.watchdog = wd.tripped
-            run.ok = not run.watchdog and "failed" not in run.flags and "looping" not in run.flags and \
+            started = self.engine.start(self.profile, args, port, log_path)
+            spawned(started)
+            deadline = self.deadline if budgeted else None
+            bench.stream_chat(server.base_url, bench.unique_prefix() + "Say hello.", 8, timeout=900)  # warmup, unrecorded
+            if not needle_only:
+                res = bench.run_bench(server.base_url, self.samples, bench.build_panel(self.seed), self.seed,
+                                      deadline=deadline)
+                run.result, run.metrics, run.flags = res, bench.metrics_of(res), res["flags"]
+                run.greedy = gates.greedy_outputs(server.base_url)
+            if needle:
+                run.needle = gates.needle_gate(server.base_url, self.profile["ctx"])
+            run.ok = "failed" not in run.flags and "looping" not in run.flags and \
                 (needle_only or bool(run.metrics.get("decode")))
-            if run.watchdog:
-                run.error = "memory-watchdog: server exceeded the memory cap and was stopped"
-            elif not run.ok:
+            if not run.ok:
                 run.error = f"run flagged {run.flags or 'no decode samples'}"
-        except EnvironmentChanged:
+        except (EnvironmentChanged, BudgetExceeded):
             raise
         except UioError as e:
             run.error = e.cause + ": " + e.message
         finally:
+            if wd:
+                wd.__exit__(None, None, None)
+                run.watchdog, run.peak, run.min_free = wd.tripped, wd.peak, wd.min_free
+            self.engine.spawn_hook = None
             if server is not None:
                 server.stop()
+            reaper.clear(self.workdir)
+        if run.watchdog:
+            run.ok = False
+            run.error = f"memory-watchdog: server stopped ({wd.reason})"
         run.finished = time.monotonic()
         try:
             self.env_ok_after()
@@ -150,7 +178,8 @@ class Tuner:
         append_jsonl(self.ledger, {"ts": now_iso(), "id": rid, "role": role, "lever": lever, "variant": variant,
                                    "args": list(args), "ok": run.ok, "error": run.error, "flags": run.flags,
                                    "metrics": summarize(run.metrics), "seconds": round(time.monotonic() - t0, 1),
-                                   "draftAcceptance": run.result.get("draftAcceptance"), "voided": False})
+                                   "draftAcceptance": run.result.get("draftAcceptance"), "voided": False,
+                                   "peakMemoryBytes": run.peak or None, "minSystemFreeBytes": run.min_free})
         return run
 
     # ---- experiments --------------------------------------------------------------------
@@ -160,15 +189,27 @@ class Tuner:
         gate["greedyEquivalence"] = {**eq, "required": lever.lossless}
         gate["greedyEquivalence"]["passed"] = eq["equal"] or not lever.lossless
         nd = self.run_config(cand_args, "gate", lever.name, None, needle=True, needle_only=True)
-        gate["needle"] = getattr(nd, "needle", {"passed": False, "trials": [], "error": nd.error})
-        if not nd.ok and not gate["needle"].get("trials"):
-            gate["needle"]["passed"] = False
+        gate["needle"] = nd.needle or {"passed": False, "trials": [], "error": nd.error}
+        # no worse than the unchanged baseline measured once at the start (a model that cannot find the needle at all is
+        # not held against the candidate, but may not do worse than it did)
+        gate["needle"]["baseline"] = None if not self.baseline_needle else {
+            k: self.baseline_needle.get(k) for k in ("exact", "total", "score")}
+        gate["needle"]["passed"] = gates.needle_no_worse(gate["needle"], self.baseline_needle)
         gate["passed"] = gate["sanity"]["passed"] and gate["greedyEquivalence"]["passed"] and gate["needle"]["passed"]
         return gate
 
+    def _early_worse(self, d: dict, ratio: float) -> bool:
+        """One control is enough to stop only when the candidate is clearly worse: below the control by more than 3x the
+        gap seen between controls of the same configuration (unknown gap: never)."""
+        if self.control_gap_seen is None or d.get("verdict") != "worse":
+            return False
+        import math
+        gap_log = max(math.log(self.control_gap_seen), 0.01)
+        return ratio > 0 and math.log(ratio) < -EARLY_EXIT_GAPS * gap_log
+
     def experiment(self, lever, variant, best_args, best_run: Run, target, guard):
         cand_args = variant.apply(best_args)
-        if cand_args == best_args:
+        if argmap.same_args(cand_args, best_args):
             return None, best_run
         if time.monotonic() - best_run.finished > self.control_max_age:
             best_run = self.run_config(best_args, "control-refresh")
@@ -179,18 +220,20 @@ class Tuner:
             entry.update(verdict="failed-run", reason=cand.error)
             self.plan_line(f"#{cand.id} {lever.name} / {variant.label}: FAILED RUN, {cand.error}")
             return entry, ctrl1
-        if point_ratio(cand.metrics, ctrl1.metrics, target) <= 1.0:
-            d = decide([ctrl1.metrics], cand.metrics, target, guard, self.min_gain, seed=self.seed)
-            d["controls"] = 1
-            entry.update(d)
-            entry["verdict"] = d["verdict"] if d["verdict"] != "accept" else "noise"
-            self.plan_line(f"#{cand.id} {lever.name} / {variant.label}: x{d['ratio']} CI {d['ci95']}, "
-                           f"did not beat control #{ctrl1.id}: {entry['verdict']}")
+        d1 = decide([ctrl1.metrics], cand.metrics, target, guard, self.min_gain, seed=self.seed)
+        if self._early_worse(d1, d1["ratio"]):
+            d1["controls"] = 1
+            entry.update(d1)
+            self.plan_line(f"#{cand.id} {lever.name} / {variant.label}: x{d1['ratio']} CI {d1['ci95']}, worse than control "
+                           f"#{ctrl1.id} by more than {EARLY_EXIT_GAPS:g}x the control gap: worse")
             return entry, ctrl1
         ctrl2 = self.run_config(best_args, "control", lever.name, "after-candidate")
         if not ctrl2.ok:
             entry.update(verdict="failed-run", reason=f"closing control failed: {ctrl2.error}")
             return entry, ctrl1
+        gap = control_gap([ctrl1.metrics, ctrl2.metrics], target)
+        if gap is not None and gap != float("inf"):
+            self.control_gap_seen = gap if self.control_gap_seen is None else max(self.control_gap_seen, gap)
         d = decide([ctrl1.metrics, ctrl2.metrics], cand.metrics, target, guard, self.min_gain, seed=self.seed)
         d["controls"] = 2
         entry.update(d)
@@ -204,10 +247,31 @@ class Tuner:
                 return entry, ctrl2
             entry["before"], entry["after"] = summarize(ctrl2.metrics), summarize(cand.metrics)
             self.plan_line(f"#{cand.id} {lever.name} / {variant.label}: ACCEPTED x{d['ratio']} CI {d['ci95']} "
-                           f"(controls #{ctrl1.id}, #{ctrl2.id}; gates passed)")
+                           f"(controls #{ctrl1.id}, #{ctrl2.id}; control gap x{d['controlGap']}; gates passed)")
             return entry, cand
         self.plan_line(f"#{cand.id} {lever.name} / {variant.label}: x{d['ratio']} CI {d['ci95']} {d['verdict']}: {d['reason']}")
         return entry, ctrl2
+
+    def confirm(self, baseline_args, best_args, target, guard) -> tuple[dict, list]:
+        """Fresh measurement of baseline vs best, control/best/control/best, after the climb. The discovery numbers are the
+        best of many tries; this round must reproduce the gain or nothing is applied. Returns (contract block, runs)."""
+        out = {"ran": True, "gainRatio": None, "ci": None, "passed": False}
+        runs = []
+        for role, args in (("confirm-control", baseline_args), ("confirm-best", best_args),
+                           ("confirm-control", baseline_args), ("confirm-best", best_args)):
+            r = self.run_config(args, role, "confirmation", None, budgeted=False)
+            runs.append(r)
+            if not r.ok:
+                self.plan_line(f"CONFIRMATION failed: run #{r.id} {r.error}")
+                return out, runs
+        c1, x1, c2, x2 = runs
+        d = decide([c1.metrics, c2.metrics], pool([x1.metrics, x2.metrics]), target, guard, self.min_gain, seed=self.seed)
+        out["gainRatio"], out["ci"] = d.get("ratio"), d.get("ci95")
+        each = [experiment.point_ratio(x.metrics, pool([c1.metrics, c2.metrics]), target) > 1.0 for x in (x1, x2)]
+        out["passed"] = bool(d.get("accept")) and all(each)
+        self.plan_line(f"CONFIRMATION: x{d.get('ratio')} CI {d.get('ci95')} control gap x{d.get('controlGap')}: "
+                       f"{'reproduced' if out['passed'] else 'NOT reproduced (' + str(d.get('reason')) + ')'}")
+        return out, runs
 
     # ---- driver -------------------------------------------------------------------------
     def tune(self) -> dict:
@@ -219,15 +283,40 @@ class Tuner:
         else:
             self.env0 = sysinfo.read_power()
         with RunLock():
-            return self._tune(g)
+            reaper.reap_stale()
+            try:
+                return self._tune(g)
+            finally:
+                reaper.clear(self.workdir)
 
     def _model_exists(self):
         import os
         return os.path.isfile(self.profile["source"]["path"])
 
+    @staticmethod
+    def _draft_n(args: list[str]) -> int | None:
+        from .engines.llamacpp import get_value
+        v = get_value(args, ("--spec-draft-n-max", "--draft-max", "--draft-n", "--draft"))
+        return int(v) if v and v.isdigit() and int(v) > 0 else None
+
+    def _ceilings(self, g, bw, ctx, best_args, acceptance):
+        draft_gguf = None
+        n = self._draft_n(best_args)
+        if acceptance is not None and n:
+            from .engines.llamacpp import get_value
+            dpath = get_value(best_args, ("-md", "--model-draft"))
+            if dpath:
+                try:
+                    draft_gguf = gguf.read_gguf(dpath)
+                except Failed:
+                    draft_gguf = None
+        return ceiling.compute(g, bw, ctx=ctx, cap_bytes=self.mem_cap,
+                               draft_accept=acceptance if n else None, draft_n=n if acceptance is not None else None,
+                               draft_gguf=draft_gguf)
+
     def _tune(self, g) -> dict:
         t_start = time.monotonic()
-        deadline = t_start + self.budget_s
+        self.deadline = t_start + self.budget_s
         self.workdir.mkdir(parents=True, exist_ok=True)
         machine = sysinfo.machine()
         if self.mem_cap is None and machine.get("memoryBytes"):
@@ -243,12 +332,14 @@ class Tuner:
                                f"budget {self.budget_s:.0f}s; samples {self.samples}; min gain {self.min_gain}\n"
                                f"- profile: {self.profile_path}\n\n## Experiments\n\n")
         baseline_args = self.engine.baseline_args(self.profile)
-        base = self.run_config(baseline_args, "baseline")
+        base = self.run_config(baseline_args, "baseline", needle=True, budgeted=False)
         if not base.ok:
             raise Failed("baseline-failed", base.error or "baseline run failed")
+        self.baseline_needle = base.needle
         target, guard = self.metric_list(base.metrics)
         best_args, best_run = list(baseline_args), base
-        self.plan_line(f"baseline #{base.id}: {summarize(base.metrics)}")
+        self.plan_line(f"baseline #{base.id}: {summarize(base.metrics)}; needle "
+                       f"{(base.needle or {}).get('exact')}/{(base.needle or {}).get('total')}")
         levers = self.lever_override if self.lever_override is not None else \
             self.engine.levers(baseline_args, ctx, machine)
         plateau_count, stop = 0, "levers-exhausted"
@@ -259,19 +350,19 @@ class Tuner:
             if not lever.lossless and self.allow != "lossy":
                 self.skipped.append({"lever": lever.name, "reason": "lossy lever and --allow lossless"})
                 continue
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= self.deadline:
                 stop = "budget"
                 break
-            won = False
+            won, measured, all_noise = False, 0, True
             try:
                 for v in lever.variants:
-                    if time.monotonic() >= deadline:
-                        stop = "budget"
-                        break
                     entry, best_run_new = self.experiment(lever, v, best_args, best_run, target, guard)
                     best_run = best_run_new
                     if entry is None:
                         continue
+                    measured += 1
+                    if entry.get("verdict") != "noise" and not entry.get("accept"):
+                        all_noise = False
                     if entry.get("accept"):
                         won = True
                         best_args = list(entry["args"])
@@ -282,39 +373,82 @@ class Tuner:
                 stop = "environment-changed"
                 self.plan_line(f"STOP: {e.message}")
                 break
-            if stop == "budget":
+            except BudgetExceeded as e:
+                stop = "budget"
+                self.plan_line(f"STOP: {e.message} (run discarded)")
                 break
-            plateau_count = 0 if won else plateau_count + 1
+            # Plateau means three levers in a row where EVERY variant was indistinguishable from noise; a lever whose variants
+            # were clearly worse, failed or were gate-rejected says something else and does not count.
+            if won or (measured and not all_noise):
+                plateau_count = 0
+            elif measured:
+                plateau_count += 1
             if plateau_count >= PLATEAU_LEVERS:
                 stop = "plateau"
                 break
         plateau = stop in ("plateau", "levers-exhausted")
         final_ok = stop in ("plateau", "levers-exhausted", "budget")
-        base_s, best_s = summarize(base.metrics), summarize(best_run.metrics)
-        out = {"baseline": {"args": baseline_args, **base_s}, "best": {"args": best_args, **best_s},
-               "ceiling": {"decodeTokS": ceil_full["decodeTokS"], "kvBytesPerToken": ceil_full["kvBytesPerToken"],
+        confirmation = {"ran": False, "gainRatio": None, "ci": None, "passed": None}
+        base_final, best_final = base.metrics, best_run.metrics
+        if self.apply and final_ok and self.accepted and not argmap.same_args(best_args, baseline_args):
+            try:
+                confirmation, cruns = self.confirm(baseline_args, best_args, target, guard)
+                if len(cruns) == 4 and all(r.ok for r in cruns):
+                    base_final, best_final = pool([cruns[0].metrics, cruns[2].metrics]), pool([cruns[1].metrics, cruns[3].metrics])
+                    best_run = cruns[3]
+            except EnvironmentChanged as e:
+                stop, final_ok = "environment-changed", False
+                confirmation = {"ran": True, "gainRatio": None, "ci": None, "passed": False}
+                self.plan_line(f"STOP: {e.message}")
+        base_s, best_s = summarize(base_final), summarize(best_final)
+        trio = lambda x: {k: x.get(k) for k in ("decode", "prefill", "ttft")}
+        acceptance = best_run.result.get("draftAcceptance")
+        ceil_best = self._ceilings(g, bw, ctx, best_args, acceptance)
+        spec = ceil_best["decodeTokS"].get("speculative")
+        denom = spec if (acceptance is not None and spec) else ceil_full["decodeTokS"]["weightsOnly"]
+        pct = round(100 * best_s["decode"] / denom, 1) if best_s.get("decode") and denom else None
+        out = {"baseline": {"args": baseline_args, **trio(base_s)}, "best": {"args": best_args, **trio(best_s)},
+               "ceiling": {"decodeTokS": ceil_best["decodeTokS"], "kvBytesPerToken": ceil_full["kvBytesPerToken"],
                            "maxSequencesUnderCap": ceil_full["maxSequencesUnderCap"], "bandwidthGBs": bw,
+                           "draftAcceptance": acceptance,
                            "percentOfDecodeCeiling": (round(100 * best_s["decode"] / cap["decodeTokS"]["weightsOnly"], 1)
                                                       if best_s.get("decode") and cap["decodeTokS"]["weightsOnly"] else None)},
+               "percentOfCeiling": pct,
                "bestArgs": best_args, "accepted": self.accepted, "rejected": self.rejected, "skipped": self.skipped,
-               "plateau": plateau, "stopReason": stop, "workdir": str(self.workdir),
-               "elapsedS": round(time.monotonic() - t_start, 1), "applied": None}
+               "plateau": plateau, "stoppedBecause": stop, "stopReason": stop, "workdir": str(self.workdir),
+               "elapsedS": round(time.monotonic() - t_start, 1), "confirmation": confirmation,
+               "applied": {"written": False, "extraArgs": None, "backup": None, "reason": "--apply not given"}}
         append_text(self.workdir / "THEORY.md", f"\n## Result\n\nBest decode {best_s.get('decode')} tok/s = "
-                    f"{out['ceiling']['percentOfDecodeCeiling']}% of the short-context bandwidth ceiling.\n")
+                    f"{pct}% of the ceiling used for the comparison "
+                    f"({'speculative, from the measured acceptance' if denom is spec and spec else 'weights only'}).\n")
         write_json(self.workdir / "best-config.json", {"extraArgs": best_args, "baselineArgs": baseline_args,
                                                        "metrics": best_s, "baselineMetrics": base_s,
                                                        "stopReason": stop, "target": self.target_name})
-        if self.apply:
-            if not final_ok:
-                out["applied"] = {"written": None, "reason": f"not applied: run ended with {stop}"}
-            elif not self.accepted:
-                out["applied"] = {"written": None, "reason": "nothing to apply: no change passed all gates"}
-            else:
-                out["applied"] = profile.apply_extra_args(self.profile_path, profile.extra_args_to_write(best_args, self.launch_args))
+        out["applied"] = self._apply(best_args, stop, final_ok, confirmation)
         try:
             profile.record_last_tune(self.profile_path, {"workdir": str(self.workdir), "plateau": plateau,
-                                                         "stopReason": stop, "applied": bool(out["applied"] and out["applied"].get("written")),
+                                                         "stopReason": stop, "applied": bool(out["applied"]["written"]),
                                                          "decodeTokS": {"before": base_s.get("decode"), "after": best_s.get("decode")}})
         except OSError:
             pass
         return out
+
+    def _apply(self, best_args, stop, final_ok, confirmation) -> dict:
+        def no(reason):
+            return {"written": False, "extraArgs": None, "backup": None, "reason": reason}
+        if not self.apply:
+            return no("--apply not given")
+        if not final_ok:
+            return no(f"run ended with {stop}")
+        if not self.accepted:
+            return no("no accepted change: nothing passed all gates")
+        if not confirmation.get("passed"):
+            return no("confirmation-failed")
+        extra, cause, detail = profile.plan_write(best_args, self.launch_args)
+        if extra is None:
+            self.plan_line(f"NOT APPLIED: {cause}: {detail}")
+            return no(cause)
+        res = profile.apply_extra_args(self.profile_path, extra, expect_before=self.extra_before)
+        if not res["written"]:
+            self.plan_line(f"NOT APPLIED: {res['reason']}: extraArgs changed since the run started")
+        return res

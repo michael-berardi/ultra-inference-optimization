@@ -253,6 +253,9 @@ class LlamaCppEngine(Engine):
         proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
         srv = LlamaServer(proc, f"http://127.0.0.1:{port}", fh)
         try:
+            hook = getattr(self, "spawn_hook", None)
+            if hook:
+                hook(srv)  # the caller's memory watchdog starts now, while the model is still loading
             wait_healthy(srv, self.startup_timeout)
         except BaseException:
             srv.stop()
