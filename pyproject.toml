@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ultra-inference-optimization"
+version = "0.1.0"
+description = "Measure, bound and hill-climb the speed of a local LLM server, with evidence."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+keywords = ["llm", "inference", "benchmark", "hill-climbing", "llama.cpp"]
+
+[project.scripts]
+uio = "ultra_inference_optimization.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
