@@ -432,7 +432,8 @@ class Tuner:
         denom = spec if (acceptance is not None and spec) else ceil_best["decodeTokS"]["weightsOnly"]
         pct = round(100 * best_s["decode"] / denom, 1) if best_s.get("decode") and denom else None
         ceiling_note = None
-        no_spec_max = max([r.metrics_median("decode") for r in self.all_runs if not self._draft_n(r.args)] or [0.0])
+        from .engines.llamacpp import SPEC_FLAGS, has_flag
+        no_spec_max = max([r.metrics_median("decode") for r in self.all_runs if not has_flag(r.args, SPEC_FLAGS)] or [0.0])
         if pct is not None and (pct > 100.0 or (no_spec_max and no_spec_max > ceil_best["decodeTokS"]["weightsOnly"])):
             # A measured decode above its own ceiling means the bandwidth figure is too low (a CPU copy probe on unified
             # memory reads well below what the GPU streams): report no percentage rather than an impossible one.
