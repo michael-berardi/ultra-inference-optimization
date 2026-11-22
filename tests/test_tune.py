@@ -207,3 +207,17 @@ class PreflightTests(TuneBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GpuBusyTests(unittest.TestCase):
+    def test_compositor_bursts_do_not_refuse_but_a_real_gpu_job_does(self):
+        from unittest import mock
+        from ultra_inference_optimization import sysinfo
+        bursts = iter([0.0, 39.0, 41.0, 36.0, 36.0])  # a Mac in use: WindowServer/browser bursts (live reading 2026-11-21)
+        with mock.patch.object(sysinfo, "gpu_utilization_percent", lambda: next(bursts)), mock.patch.object(sysinfo.time, "sleep", lambda s: None):
+            self.assertEqual(sysinfo.check_gpu_idle(), 36.0)
+        busy = iter([88.0, 92.0, 90.0, 91.0, 89.0])  # a second model server
+        with mock.patch.object(sysinfo, "gpu_utilization_percent", lambda: next(busy)), mock.patch.object(sysinfo.time, "sleep", lambda s: None):
+            with self.assertRaises(Exception) as c:
+                sysinfo.check_gpu_idle()
+            self.assertEqual(c.exception.cause, "gpu-busy")

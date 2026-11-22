@@ -162,10 +162,30 @@ def gpu_utilization_percent() -> float | None:
     return None
 
 
-def check_gpu_idle(threshold: float = 30.0) -> None:
-    u = gpu_utilization_percent()
+def gpu_busy_median(samples: int = 5, interval: float = 1.0) -> float | None:
+    """Median GPU utilization over a few seconds. One instant reading is not a measurement: on a Mac in use the
+    compositor (WindowServer, browsers, the terminal's web view) holds the GPU at 30-40% in short bursts."""
+    vals = []
+    for i in range(samples):
+        u = gpu_utilization_percent()
+        if u is not None:
+            vals.append(u)
+        if i + 1 < samples:
+            time.sleep(interval)
+    if not vals:
+        return None
+    vals.sort()
+    return vals[len(vals) // 2]
+
+
+def check_gpu_idle(threshold: float = 60.0, samples: int = 5) -> float | None:
+    """Refuse when another job is really using the GPU (median over `samples` seconds above `threshold`). Desktop
+    compositing stays under the default; a second model server or a render does not. Returns the median measured."""
+    u = gpu_busy_median(samples)
     if u is not None and u > threshold:
-        raise Refused("gpu-busy", f"GPU utilization is {u:.0f}% (> {threshold:.0f}%): stop other GPU work first")
+        raise Refused("gpu-busy", f"GPU utilization median {u:.0f}% over {samples} s (> {threshold:.0f}%): stop other GPU work "
+                                  f"first, or pass --gpu-busy-max to accept this background load")
+    return u
 
 
 def port_in_use(port: int, host: str = "127.0.0.1") -> bool:

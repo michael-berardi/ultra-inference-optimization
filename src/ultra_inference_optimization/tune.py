@@ -38,7 +38,10 @@ class Tuner:
     def __init__(self, profile_path: str, engine: Engine, target="decode", allow="lossless", budget_s=2700.0,
                  workdir: Path | None = None, apply=False, samples=6, min_gain=experiment.MIN_GAIN,
                  mem_cap_bytes: float | None = None, bandwidth_gbs: float | None = None,
-                 headroom_bytes: int = 2 * GIB, levers=None, preflight=True, seed=1, control_max_age_s=900.0):
+                 headroom_bytes: int = 2 * GIB, levers=None, preflight=True, seed=1, control_max_age_s=900.0,
+                 gpu_busy_max: float = 60.0):
+        self.gpu_busy_max = gpu_busy_max
+        self.gpu_background = None
         if target not in TARGETS:
             raise Refused("bad-target", f"target must be one of {', '.join(TARGETS)}")
         if allow not in ("lossless", "lossy"):
@@ -68,7 +71,7 @@ class Tuner:
         port = self.profile.get("port")
         if isinstance(port, int) and sysinfo.port_in_use(port):
             raise Refused("port-busy", f"the profile's port {port} is in use: stop that server first")
-        sysinfo.check_gpu_idle()
+        self.gpu_background = sysinfo.check_gpu_idle(self.gpu_busy_max)
         free = sysinfo.free_memory_bytes()
         need = g.file_size + ceiling.kv_bytes_per_token(g) * self.profile["ctx"] + self.headroom
         if free is not None and free < need:
