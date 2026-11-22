@@ -4,8 +4,10 @@ from __future__ import annotations
 import random
 import re
 import secrets
+import time
 
 from . import bench
+from .errors import BudgetExceeded
 from .bench import WORDS, stream_chat, get_text
 import json
 import http.client
@@ -63,7 +65,7 @@ def _norm(t: str) -> str:
 
 
 def needle_gate(base_url: str, ctx: int, fractions=(0.5, 1.0), codes: int = 3, timeout: float = 1800.0,
-                seed: int | None = None) -> dict:
+                seed: int | None = None, deadline: float | None = None) -> dict:
     """Plant a random passphrase in a prompt filling ~50% and ~100% (92%, room for template + answer) of ctx."""
     rng = random.Random(seed if seed is not None else secrets.randbits(64))
     results = []
@@ -71,6 +73,8 @@ def needle_gate(base_url: str, ctx: int, fractions=(0.5, 1.0), codes: int = 3, t
         target = int(ctx * (0.92 if frac >= 1.0 else frac))
         words = fit_words(base_url, target, rng)
         for _ in range(codes):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise BudgetExceeded("budget", "time budget ended during the needle gate")
             code = f"{rng.choice(WORDS)}-{secrets.randbelow(9000) + 1000}"
             prompt = make_needle_prompt(rng, words, code)
             r = stream_chat(base_url, prompt, 24, temperature=0.0, seed=1, timeout=timeout, no_think=True)

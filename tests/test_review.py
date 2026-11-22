@@ -560,3 +560,17 @@ class NeedleNormTests(unittest.TestCase):
         self.assertEqual(gates._norm("<think>\n\n</think>\n\nsummit-6763"), "summit-6763")
         self.assertEqual(gates._norm("<think>the code is x</think> `lagoon-7759`."), "lagoon-7759")
         self.assertEqual(gates._norm("plain-1234"), "plain-1234")
+
+
+class CeilingAndBudgetTests(unittest.TestCase):
+    def test_needle_gate_stops_at_the_deadline(self):
+        import time
+        from ultra_inference_optimization import gates
+        from ultra_inference_optimization.errors import BudgetExceeded
+        with self.assertRaises(BudgetExceeded):
+            gates.needle_gate("http://127.0.0.1:9", 4096, deadline=time.monotonic() - 1)
+
+    def test_kv_type_is_read_from_the_tested_args(self):
+        from ultra_inference_optimization.tune import Tuner
+        self.assertEqual(Tuner._kv_type(["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]), "q8_0")
+        self.assertEqual(Tuner._kv_type(["-fa", "on"]), "f16")

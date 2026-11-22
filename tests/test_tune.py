@@ -55,8 +55,8 @@ class TuneBase(unittest.TestCase):
                                    greedy_suffix=lambda a: "X" if "--fast-drift" in a else "")
         kw.setdefault("apply", False)
         kw.setdefault("min_gain", 0.05)
-        return Tuner(str(self.profile), eng, workdir=self.root / "wd", levers=levers, preflight=False,
-                     bandwidth_gbs=100.0, **kw)
+        kw.setdefault("bandwidth_gbs", 100.0)
+        return Tuner(str(self.profile), eng, workdir=self.root / "wd", levers=levers, preflight=False, **kw)
 
 
 class TuneTests(TuneBase):
@@ -159,6 +159,18 @@ class TuneTests(TuneBase):
             self.assertEqual(c.exception.cause, "engine-not-implemented")
         with self.assertRaises(Refused):
             get_engine("nope")
+
+
+class CeilingReportTests(TuneBase):
+    def test_a_decode_above_its_ceiling_reports_no_percentage(self):
+        # A bandwidth figure far too low (a CPU copy probe on unified memory) made the first real run print 328%.
+        out = self.tuner([], bandwidth_gbs=0.000001).tune()
+        self.assertIsNone(out["percentOfCeiling"])
+        self.assertIn("ceiling unreliable", out["ceilingNote"])
+
+    def test_no_accepted_change_reports_the_baseline_as_after(self):
+        out = self.tuner([]).tune()
+        self.assertEqual(out["best"]["decode"], out["baseline"]["decode"])
 
 
 class PreflightTests(TuneBase):

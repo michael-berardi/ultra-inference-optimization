@@ -38,6 +38,10 @@ class Run:
         self.peak = 0
         self.min_free = None
 
+    def metrics_median(self, name: str) -> float:
+        vals = sorted(v for v in (self.metrics.get(name) or []) if isinstance(v, (int, float)))
+        return float(vals[len(vals) // 2]) if vals else 0.0
+
 
 class Tuner:
     def __init__(self, profile_path: str, engine: Engine, target="decode", allow="lossless", budget_s=2700.0,
@@ -76,6 +80,7 @@ class Tuner:
         self.plan = self.workdir / "PLAN.md"
         self.env0 = None
         self.accepted: list = []
+        self.all_runs: list = []
         self.rejected: list = []
         self.skipped: list = []
 
@@ -149,7 +154,7 @@ class Tuner:
                 run.result, run.metrics, run.flags = res, bench.metrics_of(res), res["flags"]
                 run.greedy = gates.greedy_outputs(server.base_url)
             if needle:
-                run.needle = gates.needle_gate(server.base_url, self.profile["ctx"])
+                run.needle = gates.needle_gate(server.base_url, self.profile["ctx"], deadline=deadline)
             run.ok = "failed" not in run.flags and "looping" not in run.flags and \
                 (needle_only or bool(run.metrics.get("decode")))
             if not run.ok:
@@ -180,6 +185,7 @@ class Tuner:
                                    "metrics": summarize(run.metrics), "seconds": round(time.monotonic() - t0, 1),
                                    "draftAcceptance": run.result.get("draftAcceptance"), "voided": False,
                                    "peakMemoryBytes": run.peak or None, "minSystemFreeBytes": run.min_free})
+        self.all_runs.append(run)
         return run
 
     # ---- experiments --------------------------------------------------------------------
@@ -299,7 +305,13 @@ class Tuner:
         v = get_value(args, ("--spec-draft-n-max", "--draft-max", "--draft-n", "--draft"))
         return int(v) if v and v.isdigit() and int(v) > 0 else None
 
-    def _ceilings(self, g, bw, ctx, best_args, acceptance):
+    @staticmethod
+    def _kv_type(args) -> str:
+        from .engines.llamacpp import get_value
+        kv = get_value(args, ("-ctk", "--cache-type-k")) or "f16"
+        return kv if kv in ceiling.KV_BYTES else "f16"
+
+    def _ceilings(self, g, bw, ctx, best_args, acceptance, kv_type="f16"):
         draft_gguf = None
         n = self._draft_n(best_args)
         if acceptance is not None and n:
@@ -310,7 +322,7 @@ class Tuner:
                     draft_gguf = gguf.read_gguf(dpath)
                 except Failed:
                     draft_gguf = None
-        return ceiling.compute(g, bw, ctx=ctx, cap_bytes=self.mem_cap,
+        return ceiling.compute(g, bw, ctx=ctx, kv_type=kv_type, cap_bytes=self.mem_cap,
                                draft_accept=acceptance if n else None, draft_n=n if acceptance is not None else None,
                                draft_gguf=draft_gguf)
 
@@ -322,6 +334,8 @@ class Tuner:
         if self.mem_cap is None and machine.get("memoryBytes"):
             self.mem_cap = machine["memoryBytes"] * 0.85
         bw = self.bandwidth or sysinfo.measure_bandwidth()["memBandwidthGBs"]
+        if not bw:
+            raise Refused("no-bandwidth", "memory bandwidth could not be measured; pass --bandwidth <GB/s>")
         ctx = self.profile["ctx"]
         cap = ceiling.compute(g, bw, ctx=min(ctx, 1024), cap_bytes=self.mem_cap)
         ceil_full = ceiling.compute(g, bw, ctx=ctx, cap_bytes=self.mem_cap)
@@ -332,7 +346,12 @@ class Tuner:
                                f"budget {self.budget_s:.0f}s; samples {self.samples}; min gain {self.min_gain}\n"
                                f"- profile: {self.profile_path}\n\n## Experiments\n\n")
         baseline_args = self.engine.baseline_args(self.profile)
+        t_base = time.monotonic()
         base = self.run_config(baseline_args, "baseline", needle=True, budgeted=False)
+        if self.apply:
+            # Reserve the confirmation round (4 runs without gates) inside the budget, so --apply never runs past it.
+            per_run = max(30.0, (time.monotonic() - t_base) / 3.0)
+            self.deadline = max(time.monotonic(), self.deadline - 4 * per_run)
         if not base.ok:
             raise Failed("baseline-failed", base.error or "baseline run failed")
         self.baseline_needle = base.needle
@@ -400,20 +419,33 @@ class Tuner:
                 stop, final_ok = "environment-changed", False
                 confirmation = {"ran": True, "gainRatio": None, "ci": None, "passed": False}
                 self.plan_line(f"STOP: {e.message}")
+        if argmap.same_args(best_args, baseline_args):
+            best_final = base_final  # nothing changed: "after" is the baseline itself, not a later control's draw
         base_s, best_s = summarize(base_final), summarize(best_final)
         trio = lambda x: {k: x.get(k) for k in ("decode", "prefill", "ttft")}
         acceptance = best_run.result.get("draftAcceptance")
-        ceil_best = self._ceilings(g, bw, ctx, best_args, acceptance)
+        # The comparison ceiling is on the same basis as the benchmark: short prompts (so KV at 1024 tokens, not the full
+        # context), the KV cache type the server really runs, and the speculative ceiling only when acceptance was measured.
+        kv_type = self._kv_type(best_args)
+        ceil_best = self._ceilings(g, bw, min(ctx, 1024), best_args, acceptance, kv_type)
         spec = ceil_best["decodeTokS"].get("speculative")
-        denom = spec if (acceptance is not None and spec) else ceil_full["decodeTokS"]["weightsOnly"]
+        denom = spec if (acceptance is not None and spec) else ceil_best["decodeTokS"]["weightsOnly"]
         pct = round(100 * best_s["decode"] / denom, 1) if best_s.get("decode") and denom else None
+        ceiling_note = None
+        no_spec_max = max([r.metrics_median("decode") for r in self.all_runs if not self._draft_n(r.args)] or [0.0])
+        if pct is not None and (pct > 100.0 or (no_spec_max and no_spec_max > ceil_best["decodeTokS"]["weightsOnly"])):
+            # A measured decode above its own ceiling means the bandwidth figure is too low (a CPU copy probe on unified
+            # memory reads well below what the GPU streams): report no percentage rather than an impossible one.
+            ceiling_note = (f"ceiling unreliable: measured decode exceeds the ceiling computed from {bw} GB/s; pass --bandwidth "
+                            "with the device's real memory bandwidth")
+            pct = None
         out = {"baseline": {"args": baseline_args, **trio(base_s)}, "best": {"args": best_args, **trio(best_s)},
                "ceiling": {"decodeTokS": ceil_best["decodeTokS"], "kvBytesPerToken": ceil_full["kvBytesPerToken"],
                            "maxSequencesUnderCap": ceil_full["maxSequencesUnderCap"], "bandwidthGBs": bw,
                            "draftAcceptance": acceptance,
                            "percentOfDecodeCeiling": (round(100 * best_s["decode"] / cap["decodeTokS"]["weightsOnly"], 1)
                                                       if best_s.get("decode") and cap["decodeTokS"]["weightsOnly"] else None)},
-               "percentOfCeiling": pct,
+               "percentOfCeiling": pct, "ceilingNote": ceiling_note,
                "bestArgs": best_args, "accepted": self.accepted, "rejected": self.rejected, "skipped": self.skipped,
                "plateau": plateau, "stoppedBecause": stop, "stopReason": stop, "workdir": str(self.workdir),
                "elapsedS": round(time.monotonic() - t_start, 1), "confirmation": confirmation,

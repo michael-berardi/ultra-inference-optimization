@@ -30,6 +30,14 @@ Review fixes, before release:
 - `install.sh` refuses outside a checkout and installs a fixed launcher run by the absolute python3 with `-I`; the README
   install section uses the pinned release URL; the neutrality scan covers `tests/`.
 
+Second review round:
+- the reported ceiling percentage uses the benchmark's basis (short prompts, the server's KV cache type) and is withheld
+  with a named `ceilingNote` when any measured decode exceeds its own ceiling (a low bandwidth figure printed 328%);
+- with no accepted change, "after" is the baseline itself;
+- the needle gate stops at the budget deadline, and `--apply` reserves the confirmation round inside the budget;
+- a failed bandwidth measurement refuses with `no-bandwidth` instead of an unexpected error;
+- an inline `<think>` block is stripped from gate answers.
+
 ## 0.1.0-pre
 
 First release.

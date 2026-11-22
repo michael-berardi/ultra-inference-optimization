@@ -48,8 +48,10 @@ Method: see [docs/METHOD.md](docs/METHOD.md). Agent skill: [SKILL.md](SKILL.md).
 ## A real run
 
 One real tune (`--budget 90m`, decode target), a hybrid model (17 of 65 layers with attention, built-in MTP draft head) as a
-12.1 GB GGUF, llama.cpp, Apple M5 Max with 546 GB/s measured memory bandwidth. The numbers below are from that run's
-`PLAN.md` and `ledger.jsonl`:
+12.1 GB GGUF, llama.cpp, Apple M5 Max. Bandwidth was passed by hand as `--bandwidth 546` (an estimate, not a measurement:
+the built-in stdlib probe reads 100-150 GB/s from CPU processes, a lower bound that is far below what the GPU streams on
+unified memory; a no-speculation decode of 24.3 tok/s already exceeds the ceiling that figure would give). The numbers
+below are from that run's `PLAN.md` and `ledger.jsonl`:
 
 | | value |
 | --- | --- |
@@ -57,7 +59,7 @@ One real tune (`--budget 90m`, decode target), a hybrid model (17 of 65 layers w
 | a second run of the same baseline (control #11) | decode 50.7 tok/s |
 | draft acceptance at the launch configuration | 0.57 (baseline), 0.60 (control) |
 | draft acceptance across the draft-length sweep | 0.26 (16 drafted) to 0.80 (2 drafted); 0.74-0.90 with a confidence cutoff of 0.5-0.85 |
-| ceiling, weights only (546 GB/s) | 46.8 tok/s (the speculative ceiling was not computed in that run) |
+| ceiling, weights only (at the 546 GB/s estimate) | 46.8 tok/s (the speculative ceiling was not computed in that run) |
 | levers reached | draft-length sweep (2, 3, 4, 6, 8, 12, 16 and speculation off), confidence cutoff (0.5, 0.7, 0.85), draft backend sampling |
 | not reached | flash attention and ubatch size: the run stopped at the plateau rule after those three levers |
 | accepted | none; every variant was equal to or worse than the baseline, and speculation off halved decode (24.3 tok/s) |
