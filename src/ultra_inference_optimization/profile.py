@@ -27,6 +27,15 @@ def load_profile(path: str) -> dict:
     return data
 
 
+def extra_args_to_write(best_args: list[str], launch_args: list[str] | None) -> list[str]:
+    """What goes back into extraArgs. The manager re-adds its launch flags itself and llama-server keeps the last value of
+    a repeated flag, so an unchanged launch prefix is dropped and anything else is written whole."""
+    launch = list(launch_args or [])
+    if launch and best_args[:len(launch)] == launch:
+        return list(best_args[len(launch):])
+    return list(best_args)
+
+
 def apply_extra_args(path: str, best_args: list[str]) -> dict:
     """Timestamped backup, atomic replace, mode 0600. Only extraArgs changes."""
     p = Path(path)

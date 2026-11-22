@@ -43,7 +43,10 @@ class Engine:
         raise NotImplementedError
 
     def baseline_args(self, profile: dict) -> list[str]:
-        return list(profile.get("extraArgs") or [])
+        """The arguments the model really runs with today. A manager that adds its own fixed flags at launch (for example
+        flash attention, a quantised KV cache, cache-ram, batch sizes) passes them as profile["launchArgs"]; tuning only
+        extraArgs measured a different server from the one in use (2026-11-21, first real tune)."""
+        return list(profile.get("launchArgs") or []) + list(profile.get("extraArgs") or [])
 
     def levers(self, baseline_args: list[str], ctx: int, machine: dict) -> list[Lever]:
         raise NotImplementedError

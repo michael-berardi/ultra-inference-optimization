@@ -78,7 +78,7 @@ def cmd_tune(a):
     t = Tuner(a.profile, eng, target=a.target, allow=a.allow, budget_s=parse_duration(a.budget),
               workdir=Path(a.workdir) if a.workdir else None, apply=a.apply, samples=a.samples,
               mem_cap_bytes=a.mem_cap_gb * 1024 ** 3 if a.mem_cap_gb else None, bandwidth_gbs=a.bandwidth,
-              min_gain=a.min_gain, gpu_busy_max=a.gpu_busy_max)
+              min_gain=a.min_gain, gpu_busy_max=a.gpu_busy_max, launch_args=json.loads(a.launch_args) if a.launch_args else None)
     return t.tune()
 
 
@@ -134,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--samples", type=int, default=6)
     s.add_argument("--min-gain", type=float, default=0.02)
     s.add_argument("--mem-cap-gb", type=float)
+    s.add_argument("--launch-args", help="JSON list of the flags the model manager adds at launch (measured with the profile)")
     s.add_argument("--gpu-busy-max", type=float, default=60.0, help="refuse when the GPU median busy %% exceeds this (default 60)")
     s.add_argument("--bandwidth", type=float)
     s.set_defaults(fn=cmd_tune)

@@ -221,3 +221,15 @@ class GpuBusyTests(unittest.TestCase):
             with self.assertRaises(Exception) as c:
                 sysinfo.check_gpu_idle()
             self.assertEqual(c.exception.cause, "gpu-busy")
+
+
+class LaunchArgsTests(unittest.TestCase):
+    def test_baseline_measures_the_managers_launch_flags_and_apply_writes_only_the_extra(self):
+        from ultra_inference_optimization import profile as prof
+        from ultra_inference_optimization.engines.base import Engine
+        launch = ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "--cache-ram", "2048"]
+        p = {"source": {"path": "/m.gguf"}, "ctx": 4096, "extraArgs": ["--spec-draft-n-max", "5"], "launchArgs": launch}
+        self.assertEqual(Engine().baseline_args(p), launch + ["--spec-draft-n-max", "5"])
+        self.assertEqual(prof.extra_args_to_write(launch + ["--spec-draft-n-max", "6"], launch), ["--spec-draft-n-max", "6"])
+        changed = ["-fa", "on", "-ctk", "f16", "-ctv", "f16", "--cache-ram", "2048", "--spec-draft-n-max", "5"]
+        self.assertEqual(prof.extra_args_to_write(changed, launch), changed)  # a changed launch flag is written whole (last value wins)

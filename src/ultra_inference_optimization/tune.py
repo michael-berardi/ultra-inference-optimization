@@ -39,8 +39,9 @@ class Tuner:
                  workdir: Path | None = None, apply=False, samples=6, min_gain=experiment.MIN_GAIN,
                  mem_cap_bytes: float | None = None, bandwidth_gbs: float | None = None,
                  headroom_bytes: int = 2 * GIB, levers=None, preflight=True, seed=1, control_max_age_s=900.0,
-                 gpu_busy_max: float = 60.0):
+                 gpu_busy_max: float = 60.0, launch_args: list[str] | None = None):
         self.gpu_busy_max = gpu_busy_max
+        self.launch_args = list(launch_args or [])
         self.gpu_background = None
         if target not in TARGETS:
             raise Refused("bad-target", f"target must be one of {', '.join(TARGETS)}")
@@ -58,6 +59,8 @@ class Tuner:
         self.control_max_age = control_max_age_s
         self.ids = itertools.count(1)
         self.profile = profile.load_profile(profile_path)
+        if launch_args:
+            self.profile = {**self.profile, "launchArgs": list(launch_args)}
         self.ledger = self.workdir / "ledger.jsonl"
         self.plan = self.workdir / "PLAN.md"
         self.env0 = None
@@ -307,7 +310,7 @@ class Tuner:
             elif not self.accepted:
                 out["applied"] = {"written": None, "reason": "nothing to apply: no change passed all gates"}
             else:
-                out["applied"] = profile.apply_extra_args(self.profile_path, best_args)
+                out["applied"] = profile.apply_extra_args(self.profile_path, profile.extra_args_to_write(best_args, self.launch_args))
         try:
             profile.record_last_tune(self.profile_path, {"workdir": str(self.workdir), "plateau": plateau,
                                                          "stopReason": stop, "applied": bool(out["applied"] and out["applied"].get("written")),
