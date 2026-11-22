@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.1.0
+## 0.1.0 (2026-11-21)
+
+First release. Tested against a real llama.cpp server before release, which found and fixed:
+- hybrid models: KV layers are read from `attention.recurrent_layers` / `full_attention_interval` / fused qkv beside SSM state;
+- built-in MTP heads are counted per draft step, not per verified token;
+- an OpenAI-style base URL ending in `/v1` no longer doubles the path;
+- GPU-busy preflight uses a 5 s median (desktop compositing no longer refuses every run);
+- `--launch-args` measures the flags a model manager adds at launch, so the baseline is the server really in use;
+- adaptive draft cutoff and draft backend sampling levers; `-fa off` is skipped with a quantised V cache.
+
+## 0.1.0-pre
 
 First release.
 

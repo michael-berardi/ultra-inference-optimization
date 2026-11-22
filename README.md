@@ -30,6 +30,24 @@ Every command prints one JSON object on stdout (`--human` for text). Exit codes:
 
 Method: see [docs/METHOD.md](docs/METHOD.md). Agent skill: [SKILL.md](SKILL.md).
 
+## A real run
+
+A 27B hybrid model (17 of 65 layers with attention, built-in MTP draft head), 3-bit GGUF, llama.cpp, Apple M5 Max:
+
+| | value |
+| --- | --- |
+| baseline decode (median of 18) | 49-50 tok/s |
+| prefill | ~400 tok/s |
+| draft acceptance on the mixed prompt panel | 0.51 |
+| ceiling, weights only (546 GB/s) | 46.8 tok/s |
+| ceiling with the measured acceptance | 63.9 tok/s |
+| levers tried | draft length 2-16 and off, confidence cutoff 0.5-0.85, draft backend sampling, flash attention, ubatch 256-2048 |
+| accepted | none: the hand-tuned launch flags were already the best measured; speculation off halves decode |
+
+The useful result is the negative one: the remaining gap to the ceiling is draft acceptance (content dependent), not a flag.
+The first version of the ceiling also counted all 65 layers as KV layers and the MTP head as a per-token weight; the
+fixed reader takes both from the file (`attention.recurrent_layers`, `nextn` tensors).
+
 ## Guarantees
 
 - Tokens are counted from the server's `usage`, never from stream chunks.
