@@ -49,7 +49,8 @@ def read_power() -> dict:
     src = "unknown"
     for st in glob.glob("/sys/class/power_supply/BAT*/status"):
         try:
-            s = open(st).read().strip().lower()
+            with open(st) as fh:
+                s = fh.read().strip().lower()
         except OSError:
             continue
         src = "battery" if s == "discharging" else "ac"
@@ -71,9 +72,10 @@ def total_memory_bytes() -> int | None:
         v = sysctl("hw.memsize")
         return int(v) if v.isdigit() else None
     try:
-        for line in open("/proc/meminfo"):
-            if line.startswith("MemTotal:"):
-                return int(line.split()[1]) * 1024
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
     except OSError:
         pass
     return None
@@ -94,9 +96,10 @@ def free_memory_bytes() -> int | None:
                 pages += int(mm.group(1))
         return pages * page
     try:
-        for line in open("/proc/meminfo"):
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) * 1024
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
     except OSError:
         pass
     return None
@@ -276,10 +279,11 @@ def machine() -> dict:
     else:
         chip = None
         try:
-            for line in open("/proc/cpuinfo"):
-                if line.lower().startswith("model name"):
-                    chip = line.split(":", 1)[1].strip()
-                    break
+            with open("/proc/cpuinfo") as fh:
+                for line in fh:
+                    if line.lower().startswith("model name"):
+                        chip = line.split(":", 1)[1].strip()
+                        break
         except OSError:
             pass
         m["chip"] = chip or arch

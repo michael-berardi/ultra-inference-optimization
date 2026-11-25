@@ -31,13 +31,22 @@ def drop(args: list[str], names: tuple[str, ...], takes_value: bool = True) -> l
 
 
 def get_value(args: list[str], names: tuple[str, ...]) -> str | None:
-    for i, a in enumerate(args):
+    """Return the last effective value for any flag in `names`, matching llama-server last-wins semantics."""
+    val = None
+    i = 0
+    while i < len(args):
+        a = args[i]
         head = a.split("=", 1)[0]
         if head in names:
             if "=" in a:
-                return a.split("=", 1)[1]
-            return args[i + 1] if i + 1 < len(args) else ""
-    return None
+                val = a.split("=", 1)[1]
+                i += 1
+            else:
+                val = args[i + 1] if i + 1 < len(args) else ""
+                i += 2
+        else:
+            i += 1
+    return val
 
 
 def has_flag(args: list[str], names: tuple[str, ...]) -> bool:
@@ -115,7 +124,7 @@ def catalog(help_text: str, baseline: list[str], machine: dict, model_bytes: int
     else:
         fa = [Variant("-fa on", lambda a: set_bare(a, ("-fa", "--flash-attn"))),
               Variant("-fa off", lambda a: drop(a, ("-fa", "--flash-attn"), takes_value=False))]
-    quant_v = next((baseline[i + 1] for i, x in enumerate(baseline[:-1]) if x in ("-ctv", "--cache-type-v")), "f16")
+    quant_v = get_value(baseline, ("-ctv", "--cache-type-v")) or "f16"
     if quant_v not in ("f16", "f32", "bf16"):
         # llama.cpp refuses a quantised V cache without flash attention ("quantized V cache requires flash_attn"): not a lever.
         fa = [v for v in fa if not v.label.startswith("-fa off")]

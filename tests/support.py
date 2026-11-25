@@ -1,4 +1,5 @@
 """Test support: synthetic GGUF writer, fake OpenAI-compatible streaming server, fake engine."""
+import collections
 import json
 import re
 import struct
@@ -10,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from ultra_inference_optimization import bench  # noqa: E402
 from ultra_inference_optimization.engines.base import Engine, Server  # noqa: E402
 
 
@@ -76,9 +78,74 @@ def tiny_model(path, hybrid=True, moe=False):
 
 
 def precise_sleep(d):
-    end = time.perf_counter() + d
-    while time.perf_counter() < end:
-        time.sleep(0)
+    if d > 0:
+        time.sleep(d)
+
+
+class _VirtualClock:
+    """Thread-safe virtual clock for FakeServer -> bench.stream_chat timing.
+
+    Advances bench.time deterministically by each simulated request's prefill and
+    decode delays instead of busy-waiting or relying on coarse OS sleep quanta.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._refs = 0
+        self._orig_time = None
+        self._offset = 0.0
+        self._queue = collections.deque()
+        self._pending_decode = None
+
+    def acquire(self):
+        with self._lock:
+            if self._refs == 0:
+                self._orig_time = bench.time
+                self._offset = 0.0
+                self._queue.clear()
+                self._pending_decode = None
+                bench.time = self
+            self._refs += 1
+
+    def release(self):
+        with self._lock:
+            if self._refs == 0:
+                return
+            self._refs -= 1
+            if self._refs == 0 and self._orig_time is not None:
+                bench.time = self._orig_time
+                self._orig_time = None
+                self._queue.clear()
+                self._pending_decode = None
+
+    def enqueue(self, ttft_s: float, decode_s: float):
+        with self._lock:
+            # Requests against FakeServer are sequential; clear any leftover timing
+            # from an earlier aborted/failed request so it can never skew the next one.
+            self._queue.clear()
+            self._pending_decode = None
+            self._queue.append((ttft_s, decode_s))
+
+    def perf_counter(self) -> float:
+        with self._lock:
+            if self._pending_decode is not None:
+                self._offset += self._pending_decode
+                self._pending_decode = None
+            elif self._queue:
+                ttft_s, decode_s = self._queue.popleft()
+                self._offset += ttft_s
+                self._pending_decode = decode_s
+            return self._offset
+
+    def monotonic(self) -> float:
+        with self._lock:
+            return time.monotonic() + self._offset
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+_CLOCK = _VirtualClock()
 
 
 # ---- fake server --------------------------------------------------------------------------
@@ -152,12 +219,21 @@ class _Handler(BaseHTTPRequestHandler):
             toks = ["the", "same", "words", "again"] * 30
         else:
             toks = ["tok%d" % i for i in range(min(body.get("max_tokens", 16), b.cap_tokens))]
-        precise_sleep(words * b.prefill_delay_per_word)
         step = 2 if b.mode == "multi" else 1
-        for i in range(0, len(toks), step):
-            precise_sleep(b.tok_delay * step)
-            piece = " ".join(toks[i:i + step]) + " "
-            self._chunk({"choices": [{"delta": {("reasoning_content" if b.reasoning_only else "content"): piece}}]})
+        ttft_s = words * b.prefill_delay_per_word + b.tok_delay * step
+        decode_s = b.tok_delay * max(0, len(toks) - step)
+        if self.server.clock is not None:
+            self.server.clock.enqueue(ttft_s, decode_s)
+            for i in range(0, len(toks), step):
+                piece = " ".join(toks[i:i + step]) + " "
+                self._chunk({"choices": [{"delta": {("reasoning_content" if b.reasoning_only else "content"): piece}}]})
+        else:
+            precise_sleep(ttft_s)
+            for i in range(0, len(toks), step):
+                if i == step:
+                    precise_sleep(decode_s)
+                piece = " ".join(toks[i:i + step]) + " "
+                self._chunk({"choices": [{"delta": {("reasoning_content" if b.reasoning_only else "content"): piece}}]})
         final = {"choices": [{"delta": {}, "finish_reason": "length"}]}
         if b.mode != "nousage":
             final["usage"] = {"prompt_tokens": words, "completion_tokens": len(toks)}
@@ -174,20 +250,37 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class FakeServer:
-    def __init__(self, behavior=None):
+    def __init__(self, behavior=None, real_clock: bool = False):
         self.behavior = behavior or FakeBehavior()
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self._closed = False
+        self._real_clock = real_clock
+        if not real_clock:
+            _CLOCK.acquire()
+        try:
+            self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        except Exception:
+            if not real_clock:
+                _CLOCK.release()
+            raise
         self.httpd.behavior = self.behavior
+        self.httpd.clock = None if real_clock else _CLOCK
         self.httpd.daemon_threads = True
         self.httpd.handle_error = lambda *a: None
         self.port = self.httpd.server_address[1]
         self.base_url = f"http://127.0.0.1:{self.port}"
-        self._t = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self._t = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self._t.start()
 
     def close(self):
-        self.httpd.shutdown()
-        self.httpd.server_close()
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+        finally:
+            if not self._real_clock:
+                _CLOCK.release()
 
 
 # ---- fake engine --------------------------------------------------------------------------

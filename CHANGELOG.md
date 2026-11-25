@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 (2026-11-25)
+
+- `llamacpp.get_value` now follows `llama-server` last-wins semantics when a flag is overridden by `extraArgs` after `launchArgs`, and `catalog()` respects `--cache-type-v=<type>` (`=` syntax) and overrides when deciding whether `-fa off` is valid.
+- Close Linux `/sys` and `/proc` file handles cleanly via context managers in `sysinfo.py`.
+- Fix single-file unittest execution (`python3 -m unittest tests/test_bench.py`) via `tests/__init__.py` and place `if __name__ == "__main__":` guards at file ends so direct runs execute all test classes.
+- Replace the busy-wait in `tests/support.py` (`precise_sleep`) with a virtual clock on `FakeServer` (retaining a real-clock end-to-end timing test in `tests/test_bench.py`) and lower the server shutdown poll interval so `python3 -m unittest discover -s tests` runs quickly and deterministically without weakening assertions.
+- Add `SECURITY.md` and `CONTRIBUTING.md`.
+
 ## 0.1.0 (2026-11-21)
 
 First release. Tested against a real llama.cpp server before release, which found and fixed:

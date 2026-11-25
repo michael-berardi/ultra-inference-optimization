@@ -11,8 +11,8 @@ Inspired by the MIT-licensed `inference-optimisation` agent skill; this is an in
 Pinned release (works without a checkout):
 
 ```sh
-uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.0"
-# or: pipx install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.0"
+uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.1"
+# or: pipx install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.1"
 ```
 
 From a checkout:

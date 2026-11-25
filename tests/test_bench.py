@@ -69,9 +69,45 @@ class BenchTests(unittest.TestCase):
         self.assertGreater(bench.repeat_ratio("a b c d " * 50), 0.9)
         self.assertGreater(bench.repeat_ratio("abcdefgh" * 40), 0.9)
 
+    def test_real_wall_clock_ttft_and_decode_timing(self):
+        """End-to-end real-clock check so regressions in when t_first/t_end are sampled still fail."""
+        b = FakeBehavior()
+        b.prefill_delay_per_word = 0.004  # 10 words -> ~40 ms prefill
+        b.tok_delay = 0.005               # 15 remaining tokens -> ~75 ms decode
+        b.cap_tokens = 16
+        fs = FakeServer(b, real_clock=True)
+        try:
+            r = bench.stream_chat(fs.base_url, " ".join(f"w{i}" for i in range(10)), 16, temperature=0.0, timeout=20)
+        finally:
+            fs.close()
+        self.assertTrue(r["ok"], r["error"])
+        self.assertEqual(r["completionTokens"], 16)
+        self.assertGreaterEqual(r["ttftS"], 0.04)
+        self.assertGreaterEqual(r["decodeS"], 0.065)
+        decode_tok_s = (r["completionTokens"] - 1) / r["decodeS"]
+        self.assertTrue(15 < decode_tok_s < 250, decode_tok_s)
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_virtual_clock_clears_stale_state_between_requests(self):
+        """Leftover queued or pending state from an aborted request must not skew the next request."""
+        b = FakeBehavior()
+        b.prefill_delay_per_word = 0.001
+        b.tok_delay = 0.002
+        b.cap_tokens = 16
+        fs = FakeServer(b)
+        try:
+            # Case 1: earlier request aborted after t_first (leaving _pending_decode set)
+            fs.httpd.clock.enqueue(99.0, 88.0)
+            fs.httpd.clock.perf_counter()
+            r1 = bench.stream_chat(fs.base_url, "one two three", 16, temperature=0.0, timeout=20)
+            # Case 2: earlier request aborted before t_first (leaving _queue populated)
+            fs.httpd.clock.enqueue(77.0, 66.0)
+            r2 = bench.stream_chat(fs.base_url, "one two three", 16, temperature=0.0, timeout=20)
+        finally:
+            fs.close()
+        for r in (r1, r2):
+            self.assertTrue(r["ok"], r["error"])
+            self.assertAlmostEqual(r["ttftS"], 3 * 0.001 + 0.002, places=6)
+            self.assertAlmostEqual(r["decodeS"], 15 * 0.002, places=6)
 
 
 class ServerRootTests(unittest.TestCase):
@@ -80,3 +116,7 @@ class ServerRootTests(unittest.TestCase):
         for base in ("http://127.0.0.1:8089", "http://127.0.0.1:8089/", "http://127.0.0.1:8089/v1", "http://127.0.0.1:8089/v1/"):
             with self.subTest(base=base):
                 self.assertEqual(bench.server_root(base), "http://127.0.0.1:8089")
+
+
+if __name__ == "__main__":
+    unittest.main()

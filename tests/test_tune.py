@@ -217,10 +217,6 @@ class PreflightTests(TuneBase):
         self.assertEqual(c.exception.cause, "lock-held")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class GpuBusyTests(unittest.TestCase):
     def test_compositor_bursts_do_not_refuse_but_a_real_gpu_job_does(self):
         from unittest import mock
@@ -261,5 +257,14 @@ class CatalogTests(unittest.TestCase):
         self.assertIsNone(names["speculative-confidence-cutoff"].skip_reason)
         self.assertIn("draft-backend-sampling", names)
         self.assertEqual([v.label for v in names["flash-attention"].variants], ["-fa on"])
-        no_spec = {lv.name for lv in llamacpp.catalog(self.HELP, ["-fa", "on"], {"perfCores": 6})}
+        # Equals syntax and last-wins overrides work the same way
+        eq_names = {lv.name: lv for lv in llamacpp.catalog(self.HELP, ["-fa", "on", "--cache-type-v=q8_0"], {"perfCores": 6})}
+        self.assertEqual([v.label for v in eq_names["flash-attention"].variants], ["-fa on"])
+        over_names = {lv.name: lv for lv in llamacpp.catalog(self.HELP, ["-fa", "on", "-ctv", "q8_0", "-ctv", "f16"], {"perfCores": 6})}
+        self.assertEqual([v.label for v in over_names["flash-attention"].variants], ["-fa on", "-fa off"])
+        no_spec = {lv.name: lv for lv in llamacpp.catalog(self.HELP, ["-fa", "on"], {"perfCores": 6})}
         self.assertNotIn("speculative-confidence-cutoff", no_spec)
+
+
+if __name__ == "__main__":
+    unittest.main()
