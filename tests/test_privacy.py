@@ -201,6 +201,18 @@ class DirectoryOwnership(unittest.TestCase):
             for p in (home, runs, leaf):
                 self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o700, p)
 
+    def test_ancestors_above_uio_home_are_left_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            mid = Path(d) / "mid"
+            mid.mkdir(mode=0o755)
+            os.chmod(mid, 0o755)
+            home = mid / "home"
+            with mock.patch.dict(os.environ, {"UIO_HOME": str(home)}):
+                util.private_mkdir(home / "runs" / "x")
+            self.assertEqual(stat.S_IMODE(mid.stat().st_mode), 0o755)
+            for p in (home, home / "runs", home / "runs" / "x"):
+                self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o700, p)
+
 
 if __name__ == "__main__":
     unittest.main()
