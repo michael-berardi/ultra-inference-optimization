@@ -2,12 +2,18 @@
 
 ## 0.2.0 (2026-11-26)
 
+- One-line installer and release assets: `install.sh` downloads the wheel and `SHA256SUMS`, verifies the wheel before
+  installing, and uses uv, pipx or a private venv under `~/.local/share/uio`, with a managed shim in `~/.local/bin` that
+  refuses to overwrite a foreign command. The offline checkout installer keeps working in the same script; `install.ps1`
+  installs on Windows through WSL; `scripts/build-release.sh` builds the wheel, installer and checksum assets.
 - Update notice: after a command in an interactive terminal, two stderr lines when a newer stable release exists, at
   most once a day per version. Never in the JSON result, in CI, in agent sessions, off a terminal or after an opt-out
   (`UIO_NO_UPDATE_CHECK=1` or `uio update --check-auto off`).
-- `uio update` installs the new release with whatever installed `uio` (uv, pipx, or `install.sh` from the release
-  tag), puts the running version back when that fails, and keeps one rollback (`--rollback`). Also `--check`
-  (exit 0 / 10 / 1), `--skip`, `--auto on|off|status` (off by default) and `--clear-state`.
+- `uio update` installs the new release with whatever installed `uio`: uv, pipx, a checkout `install.sh` (from the
+  release tag), or the one-line installer (the release's `install.sh`, run only when it matches `SHA256SUMS`, with the
+  same root, bin directory and backend). It puts the running version back when that fails and keeps one rollback
+  (`--rollback`). Also `--check` (exit 0 / 10 / 1), `--skip`, `--auto on|off|status` (off by default) and
+  `--clear-state`.
 - The check is one anonymous GET of the public latest-release record, at most once per 24 hours, from a detached
   background process with a 4 s timeout. State is one 0600 file; automatic installs log to one file of at most
   256 KB. See `docs/updates.md` and `PRIVACY.md`.
@@ -20,7 +26,10 @@
   `--workdir`, a profile's parent) keep their permissions.
 - Default `tune`/`climb` keep only the ten newest run folders; older benchmark logs are deleted at the start of the next
   run. An explicit `--workdir` is never pruned.
-- The pinned uv and pipx install commands set `DO_NOT_TRACK=1`.
+- uv and pipx run with `DO_NOT_TRACK=1`, in the pinned install commands and inside the installer.
+- Tests: the installer against a local release directory with a temporary HOME (venv, uv, pipx, bad checksums,
+  foreign-shim refusal), and `uio update` for one-line installs (verified install, rollback, tampered `install.sh` or
+  wheel, restore after a broken shim, each real backend detected). Adds `uv.lock`.
 
 ## 0.1.1 (2026-11-25)
 

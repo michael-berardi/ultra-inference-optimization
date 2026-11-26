@@ -8,6 +8,7 @@ capped at 256 KB.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -34,6 +35,12 @@ MAX_LOG = 256 * 1024
 STATE = "update.json"
 LOG = "update.log"
 SHIM_MARKER = "# uio-shim: managed by ultra-inference-optimization install.sh"
+INSTALLED_MARKER = ".uio-installed"  # install.sh's ownership marker in its install root
+MAX_ASSET = 1024 * 1024
+DOWNLOAD_TIMEOUT = 60.0
+# Where the release-mode install.sh puts each backend under its install root.
+_LAYOUTS = (("venv", ("venv",)), ("uv", ("uv-tools", "ultra-inference-optimization")),
+            ("pipx", ("pipx", "venvs", "ultra-inference-optimization")))
 _VERSION = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 DEFAULTS = {"checkedAt": 0.0, "latest": None, "failure": None, "skip": None, "auto": False,
@@ -252,12 +259,28 @@ def _record_auto_failure(rel: dict, e) -> None:
 
 
 # ---- install -------------------------------------------------------------------------------------------------------
+def installer_layout():
+    """The release-mode install.sh layout running this copy: <root>/venv, <root>/uv-tools/<name> or
+    <root>/pipx/venvs/<name>, with install.sh's ownership marker in <root>."""
+    prefix = Path(sys.prefix).resolve()
+    if prefix not in Path(__file__).resolve().parents:
+        return None
+    for backend, parts in _LAYOUTS:
+        if prefix.parts[-len(parts):] == parts:
+            root = prefix.parents[len(parts) - 1]
+            if (root / INSTALLED_MARKER).is_file():
+                return {"backend": backend, "root": str(root)}
+    return None
+
+
 def install_kind() -> str:
     pkg = Path(__file__).resolve().parent
     if (pkg.parent / "uio_launcher.py").is_file():
-        return "shim"  # install.sh layout: <root>/<version>/{uio_launcher.py,ultra_inference_optimization}
+        return "shim"  # checkout-mode install.sh layout: <root>/<version>/{uio_launcher.py,ultra_inference_optimization}
     if (pkg.parents[1] / "pyproject.toml").is_file():
         return "source"  # running from a checkout (editable install or src on the path)
+    if installer_layout():
+        return "installer"  # release-mode install.sh: uv, pipx or a venv it owns, before the generic uv/pipx checks
     if (Path(sys.prefix) / "uv-receipt.toml").is_file():
         return "uv"
     if (Path(sys.prefix) / "pipx_metadata.json").is_file():
@@ -275,17 +298,39 @@ def _shim_launcher(text: str):
     return Path(m.group(1).replace("'\\''", "'")) if m else None
 
 
-def find_shim():
-    """The install.sh shim that runs this copy (on PATH or in ~/.local/bin)."""
-    here = Path(__file__).resolve().parents[1]
+def _shim_target(text: str):
+    m = re.search(r"^exec '((?:[^']|'\\'')*)' \"\$@\"$", text, re.M)
+    return Path(m.group(1).replace("'\\''", "'")) if m else None
+
+
+def _managed_shims():
+    """(path, text) of each install.sh shim on PATH or in ~/.local/bin."""
     for cand in dict.fromkeys(filter(None, [shutil.which(TOOL), str(Path.home() / ".local" / "bin" / TOOL)])):
         try:
             text = Path(cand).read_text()
         except (OSError, UnicodeDecodeError):
             continue
-        launcher = _shim_launcher(text) if SHIM_MARKER in text else None
+        if SHIM_MARKER in text:
+            yield Path(cand), text
+
+
+def find_shim():
+    """The checkout-mode install.sh shim that runs this copy (on PATH or in ~/.local/bin)."""
+    here = Path(__file__).resolve().parents[1]
+    for cand, text in _managed_shims():
+        launcher = _shim_launcher(text)
         if launcher and launcher.resolve().parent == here:
-            return {"bin": str(Path(cand).parent), "root": str(here.parent), "dir": str(here)}
+            return {"bin": str(cand.parent), "root": str(here.parent), "dir": str(here)}
+    return None
+
+
+def find_installer_shim(root):
+    """The release-mode install.sh shim whose command lives under that installer's root."""
+    root = Path(root).resolve()
+    for cand, text in _managed_shims():
+        target = _shim_target(text)
+        if target and root in Path(os.path.abspath(target)).parents:
+            return {"bin": str(cand.parent)}
     return None
 
 
@@ -306,6 +351,12 @@ def install_plan(rel: dict) -> dict:
         if not shim:
             raise Refused("shim-not-found", "the shim that runs this install was not found; reinstall with install.sh")
         return {**plan, **shim, "display": f"install.sh from {tag}"}
+    if kind == "installer":
+        layout = installer_layout()
+        shim = find_installer_shim(layout["root"]) if layout else None
+        if not shim:
+            raise Refused("shim-not-found", "the shim that runs this install was not found; reinstall with install.sh")
+        return {**plan, **layout, **shim, "display": f"install.sh from the {tag} release"}
     if kind == "source":
         raise Refused("source-checkout", "this uio runs from a source checkout; update it with git, then reinstall")
     raise Refused("unmanaged-install", f"this install is managed by pip; run: python3 -m pip install --upgrade "
@@ -317,6 +368,12 @@ def _run(args, **kw) -> None:
     if proc.returncode != 0:
         tail = (proc.stdout + proc.stderr).strip().splitlines()[-3:]
         raise Failed("install-failed", f"{Path(args[0]).name} exited {proc.returncode}: " + " | ".join(tail))
+
+
+def _installer_env(**extra) -> dict:
+    """The caller's environment without install.sh's own source overrides, plus `extra`."""
+    env = {k: v for k, v in os.environ.items() if k not in ("UIO_RELEASE_BASE", "UIO_VERSION", "UIO_INSTALLER")}
+    return {**env, **extra}
 
 
 def clone(tag: str, dest: Path) -> None:
@@ -342,7 +399,65 @@ def _install_shim(plan: dict) -> None:
         if got != plan["version"]:
             raise Failed("verify-failed", f"the {plan['tag']} checkout reports version {got}, not {plan['version']}")
         _run(["sh", str(src / "install.sh")], cwd=td,
-             env={**os.environ, "UIO_INSTALL_ROOT": plan["root"], "UIO_BIN_DIR": plan["bin"]})
+             env=_installer_env(UIO_INSTALL_ROOT=plan["root"], UIO_BIN_DIR=plan["bin"]))
+
+
+def release_base(tag: str) -> str:
+    """Where a release's assets (wheel, install.sh, SHA256SUMS) are downloaded from."""
+    return f"{SOURCE}/releases/download/{tag}"
+
+
+def _download(src: str, dest: Path, limit: int = MAX_ASSET) -> None:
+    """One release asset over HTTPS (or from a local release directory in tests), size-capped."""
+    try:
+        if src.startswith("https://"):
+            req = urllib.request.Request(src, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT) as r:
+                data = r.read(limit + 1)
+        elif "://" in src:
+            raise ValueError("release assets are only fetched over https")
+        else:
+            data = Path(src).read_bytes()
+    except Exception as e:
+        raise Failed("download-failed", f"cannot download {src.rsplit('/', 1)[-1]}: {_cause(e)}") from e
+    if len(data) > limit:
+        raise Failed("download-failed", f"{src.rsplit('/', 1)[-1]} is larger than a release asset can be")
+    dest.write_bytes(data)
+
+
+def listed_sha256(sums: str, name: str):
+    """The SHA-256 that a `sha256sum`-style SHA256SUMS lists for `name`, or None."""
+    for line in sums.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*") == name and re.fullmatch(r"[0-9a-f]{64}", parts[0].lower()):
+            return parts[0].lower()
+    return None
+
+
+def _install_release(plan: dict) -> None:
+    """Fetch the tag's SHA256SUMS and install.sh, verify install.sh, then run it with the same root, bin dir and
+    backend. install.sh verifies the wheel against the same SHA256SUMS before it installs anything."""
+    base = release_base(plan["tag"])
+    with tempfile.TemporaryDirectory(prefix="uio-update-") as td:  # removed on success and on failure
+        sums, script = Path(td) / "SHA256SUMS", Path(td) / "install.sh"
+        _download(f"{base}/SHA256SUMS", sums, 64 * 1024)
+        _download(f"{base}/install.sh", script)
+        want = listed_sha256(sums.read_text(errors="replace"), "install.sh")
+        if not want or hashlib.sha256(script.read_bytes()).hexdigest() != want:
+            raise Failed("verify-failed", f"install.sh from {plan['tag']} does not match the release's SHA256SUMS; "
+                                          f"nothing was installed")
+        _run(["sh", str(script)], cwd=td,
+             env=_installer_env(UIO_INSTALL_ROOT=plan["root"], UIO_BIN_DIR=plan["bin"], UIO_RELEASE_BASE=base,
+                                UIO_VERSION=plan["version"], UIO_INSTALLER=plan["backend"]))
+
+
+def _shim_reports(bindir: str, version: str) -> bool:
+    try:
+        out = subprocess.run([str(Path(bindir) / TOOL), "--version"], stdin=subprocess.DEVNULL, capture_output=True,
+                             text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and out.stdout.strip() == f"{TOOL} {version}"
 
 
 def _replace(target: Path, data: bytes, mode: int) -> None:
@@ -378,6 +493,8 @@ def run_install(plan: dict) -> None:
     try:
         if plan["kind"] == "shim":
             _install_shim(plan)
+        elif plan["kind"] == "installer":
+            _install_release(plan)
         else:
             _run(plan["args"])
     except Exception as e:
@@ -387,6 +504,12 @@ def run_install(plan: dict) -> None:
                 _replace(shim, shim_before, 0o755)
                 if plan["version"] != __version__:  # a half-written new release folder is debris
                     shutil.rmtree(Path(plan["root"]) / plan["version"], ignore_errors=True)
+            elif plan["kind"] == "installer":
+                # Nothing is touched before install.sh runs; after that, put the running version back unless the
+                # shim still runs it (the venv backend restores its own copy; uv/pipx --force may not).
+                if not (isinstance(e, Failed) and e.cause in ("download-failed", "verify-failed")) \
+                        and not _shim_reports(plan["bin"], __version__):
+                    _install_release({**plan, "tag": prev["tag"], "version": __version__})
             else:  # a failed `uv tool install --force` can remove the old tool environment: reinstall this tag
                 _run([shutil.which(plan["kind"]) or plan["kind"]] + _manager_command(plan["kind"], prev["tag"])[1:])
         except Exception as r:

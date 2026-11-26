@@ -17,9 +17,11 @@ dependencies. It ships no UI, web page, font or remote script.
 - The check does not run when stdout or stderr is not a terminal, when `CI` is set, in agent sessions (`UIO_AGENT=1`
   or `AGENT=1`), with `UIO_NO_UPDATE_CHECK=1`, or after `uio update --check-auto off`.
 - `uio update` (run by you, or by the daily check when you turned automatic installs on) makes the same request and
-  then fetches the release tag from GitHub through uv, pipx or git. Apart from that, the installed tool never fetches
-  code.
-- The install commands in the README are run by you and fetch the pinned source; they set `DO_NOT_TRACK=1`.
+  then fetches the release from GitHub: the tag through uv, pipx or git, or the release's `SHA256SUMS`, `install.sh`
+  and wheel for a one-line install. Apart from that, the installed tool never fetches code.
+- The install commands in the README are run by you. The one-line installer downloads `SHA256SUMS` and the wheel (and,
+  on Windows, `install.sh`) from the GitHub release; the uv and pipx commands fetch the pinned tag. All of them set
+  `DO_NOT_TRACK=1` for uv and pipx.
 
 ## Local files
 
@@ -43,3 +45,5 @@ never chmodded and keep their own permissions.
 - With `--apply`, a 0600 backup of the profile is written next to the profile.
 - `uio update --clear-state` removes `update.json` and `update.log` (run it before uninstalling).
 - `rm -rf ~/.cache/uio` removes everything `uio` stores; also delete any `*.bak-*` files next to profiles you applied to.
+- The installer itself writes only `~/.local/share/uio` (or `UIO_INSTALL_ROOT`) and the `~/.local/bin/uio` shim; remove
+  both to uninstall it.

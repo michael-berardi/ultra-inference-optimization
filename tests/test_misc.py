@@ -247,7 +247,7 @@ class InstallTests(unittest.TestCase):
             foreign.write_text("#!/bin/sh\necho foreign\n")
             r = self.run_install(root, bindir)
             self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-            self.assertIn("not installed by this script", r.stderr)
+            self.assertIn("was not installed by this script", r.stderr)
             self.assertEqual(foreign.read_text(), "#!/bin/sh\necho foreign\n")
             foreign.unlink()
             r = self.run_install(root, bindir)

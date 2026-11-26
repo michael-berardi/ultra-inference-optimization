@@ -50,21 +50,27 @@ version and never for a skipped version; a newer release notifies again.
 | --- | --- |
 | `uv tool install "git+…@vX.Y.Z"` | `uv tool install --force git+https://github.com/<owner>/<repo>@<new tag>` |
 | `pipx install "git+…@vX.Y.Z"` | `pipx install --force git+https://github.com/<owner>/<repo>@<new tag>` |
-| `sh install.sh` | clones the new tag into a temporary directory and runs its `install.sh` with the same install root and bin directory |
+| `curl -fsSL …/releases/latest/download/install.sh \| sh` (uv, pipx or private venv under `~/.local/share/uio`) | downloads the new release's `SHA256SUMS` and `install.sh` into a temporary directory, checks `install.sh` against `SHA256SUMS`, and runs it with the same install root, bin directory and backend; it verifies the wheel before installing |
+| `sh install.sh` from a checkout | clones the new tag into a temporary directory and runs its `install.sh` with the same install root and bin directory |
 | pip, or a source checkout | nothing: it refuses and names what to run (`pip install --upgrade …`, or update the checkout with git) |
 
 ## Safety
 
-- Releases are git tags without binary assets or `SHA256SUMS`, so integrity rests on the exact tag fetched from
-  GitHub over HTTPS by uv, pipx or git. For `install.sh` installs, the cloned tag's `__version__` must equal the
-  release version before its `install.sh` runs; the shim is replaced atomically at the end.
+- Each release carries the wheel, `install.sh`, `install.ps1` and `SHA256SUMS`. A release-installer update runs the new
+  `install.sh` only when its SHA-256 matches the release's `SHA256SUMS`, and that script installs the wheel only when the
+  wheel matches too; a mismatch installs nothing. The shim is replaced atomically at the end.
+- uv and pipx git installs rest on the exact tag fetched from GitHub over HTTPS. For checkout `install.sh` installs, the
+  cloned tag's `__version__` must equal the release version before its `install.sh` runs.
 - uv and pipx own their environments; `uio` never writes into them. A failed `uv tool install --force` can remove the
   old environment, so after any failed uv or pipx install `uio` reinstalls the running version's tag.
-- A failed `install.sh` update puts the previous shim back and removes the half-written release folder.
-- One rollback is kept: the previous tag for uv and pipx (a record only, no files), or the previous release folder
-  for `install.sh`. That folder is removed after the new version has run successfully once, or after 7 days at most
-  (`--rollback` then reinstalls the previous tag). Older release folders are removed when an update installs.
-- The temporary clone is removed on success and on failure.
+- A failed checkout `install.sh` update puts the previous shim back and removes the half-written release folder. A
+  failed release-installer update leaves the running version in place (the private venv is swapped only after the new
+  one starts), and if the shim no longer runs it, `uio` reinstalls the running version's release.
+- One rollback is kept: the previous tag for uv, pipx and the release installer (a record only, no files), or the
+  previous release folder for checkout `install.sh` installs. That folder is removed after the new version has run
+  successfully once, or after 7 days at most (`--rollback` then reinstalls the previous tag). Older release folders are
+  removed when an update installs.
+- The temporary clone or download folder is removed on success and on failure.
 - Running work is not touched: the new version applies from the next start, and an automatic install waits while a
   `uio tune` holds `~/.cache/uio/lock`.
 

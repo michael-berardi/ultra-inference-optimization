@@ -8,21 +8,37 @@ Inspired by the MIT-licensed `inference-optimisation` agent skill; this is an in
 
 ## Install
 
-Pinned release (works without a checkout):
+macOS / Linux (one line):
+
+```sh
+curl -fsSL https://github.com/michael-berardi/ultra-inference-optimization/releases/latest/download/install.sh | sh
+```
+
+Windows (one line; uio needs POSIX locks and process groups, so this installs inside WSL):
+
+```powershell
+irm https://github.com/michael-berardi/ultra-inference-optimization/releases/latest/download/install.ps1 | iex
+```
+
+The installer downloads the release wheel with `SHA256SUMS`, verifies its SHA-256 before installing anything, and uses
+`uv` or `pipx` when present; otherwise it creates a private venv under `~/.local/share/uio`. It writes a managed shim at
+`~/.local/bin/uio` and never overwrites a `uio` it did not install. Set `UIO_VERSION=0.2.0` to pin a release or
+`UIO_RELEASE_BASE` to test against a local release directory.
+
+Other ways to install a pinned release (works without a checkout):
 
 ```sh
 DO_NOT_TRACK=1 uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.2.0"
 # or: DO_NOT_TRACK=1 pipx install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.2.0"
 ```
 
-From a checkout:
+From a checkout (offline; copies the source tree next to `install.sh`):
 
 ```sh
 sh install.sh            # ~/.local/share/uio/<version> + shim ~/.local/bin/uio (refuses to overwrite a foreign uio)
 ```
 
-`install.sh` refuses to run unless it sits in a checkout (it copies the tree next to it); piping it from a URL is refused.
-The shim runs a fixed launcher file under the absolute `python3` found at install time, in isolated mode (`-I`).
+The shim runs a fixed launcher under the absolute `python3` found at install time, in isolated mode (`-I`).
 
 ## Commands
 

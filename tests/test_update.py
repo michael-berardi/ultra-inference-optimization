@@ -4,6 +4,7 @@ No test uses the network: the release record comes from a loopback HTTP server a
 repository's own install.sh writing into a temporary directory.
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -27,6 +28,7 @@ from ultra_inference_optimization.lock import RunLock
 
 ROOT = Path(__file__).resolve().parent.parent
 REAL_SPAWN = update.spawn_check
+REAL_RELEASE_BASE = update.release_base
 NOTICE = [f"uio 9.9.9 available (you have {__version__}) · run: uio update",
           "turn on automatic updates: uio update --auto on · skip: uio update --skip"]
 
@@ -331,6 +333,22 @@ class Detection(EnvBase):
                 (Path(d) / "uv-receipt.toml").write_text("")
                 self.assertEqual(update.install_kind(), "uv")
 
+    def test_release_installer_layouts(self):
+        for backend, parts in update._LAYOUTS:
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as d:
+                root = Path(d).resolve()
+                prefix = root.joinpath(*parts)
+                pkg = prefix / "lib" / "python3" / "site-packages" / "ultra_inference_optimization"
+                pkg.mkdir(parents=True)
+                (prefix / "uv-receipt.toml").write_text("")  # uv's own receipt must not win over install.sh's layout
+                (prefix / "pipx_metadata.json").write_text("{}")
+                with mock.patch.object(update, "__file__", str(pkg / "update.py")), \
+                        mock.patch.object(update.sys, "prefix", str(prefix)):
+                    self.assertNotEqual(update.install_kind(), "installer")  # no ownership marker: not ours
+                    (root / update.INSTALLED_MARKER).write_text("# uio-installed\n")
+                    self.assertEqual(update.install_kind(), "installer")
+                    self.assertEqual(update.installer_layout(), {"backend": backend, "root": str(root)})
+
     def test_package_managers_run_their_own_command_or_are_named(self):
         rel = {"tag": "v9.9.9", "version": "9.9.9"}
         with mock.patch.object(update.shutil, "which", lambda name: f"/fake/{name}"):
@@ -392,7 +410,8 @@ class InstallSafety(EnvBase):
         with mock.patch.object(update, "clone", fake_clone("9.9.9")):
             update.run_install(plan)
         self.assertEqual(self.version(), "uio 9.9.9")
-        self.assertEqual(sorted(p.name for p in self.root.iterdir()), sorted([__version__, "9.9.9"]))
+        folders = sorted(p.name for p in self.root.iterdir() if p.is_dir())  # beside install.sh's ownership marker
+        self.assertEqual(folders, sorted([__version__, "9.9.9"]))
         self.assertEqual(list(self.tmp.iterdir()), [])  # the clone's temp dir is gone
         res = update.rollback()
         self.assertEqual(res, {"status": "rolled-back", "version": __version__, "skipped": "9.9.9"})
@@ -441,6 +460,164 @@ class InstallSafety(EnvBase):
         with self.assertRaises(Failed) as c:
             update._run([sys.executable, "-c", "import sys; print('boom'); sys.exit(3)"])
         self.assertIn("exited 3: boom", c.exception.message)
+
+
+def build_release(dest: Path, version: str, work: Path, install_sh=None) -> Path:
+    """A local release directory like the published one: wheel, install.sh, install.ps1 and SHA256SUMS."""
+    src = work / f"src-{version}"
+    shutil.copytree(ROOT / "src", src / "src", ignore=shutil.ignore_patterns("__pycache__"))
+    for name in ("pyproject.toml", "README.md"):
+        shutil.copy(ROOT / name, src / name)
+    for path, old in ((src / "pyproject.toml", f'version = "{__version__}"'),
+                      (src / "src" / "ultra_inference_optimization" / "__init__.py", f'"{__version__}"')):
+        path.write_text(path.read_text().replace(old, old.replace(__version__, version)))
+    dest.mkdir(parents=True)
+    built = subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "--wheel-dir", str(dest), str(src)],
+                           capture_output=True, text=True, timeout=300,
+                           env={**os.environ, "SOURCE_DATE_EPOCH": "0", "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
+    assert built.returncode == 0, built.stdout + built.stderr
+    (dest / "install.sh").write_text(install_sh or (ROOT / "install.sh").read_text())
+    shutil.copy(ROOT / "install.ps1", dest)
+    (dest / "SHA256SUMS").write_text("".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n"
+                                             for p in sorted(dest.iterdir())))
+    return dest
+
+
+class ReleaseInstallerUpdates(EnvBase):
+    """`uio update` for a one-line (release-mode install.sh) install, against local release directories."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._work = tempfile.TemporaryDirectory()
+        work = Path(cls._work.name).resolve()
+        cls.current = build_release(work / "current", __version__, work)
+        cls.new = build_release(work / "new", "9.9.9", work)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._work.cleanup()
+
+    def setUp(self):
+        super().setUp()
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        base = Path(work.name).resolve()
+        self.root, self.bindir, self.tmp = base / "share", base / "bin", base / "tmp"
+        self.tmp.mkdir()
+        os.environ["HOME"] = str(base / "home")  # no candidate shim from the real home is ever read
+        os.environ.pop("UIO_INSTALLER", None)
+        r = subprocess.run(["sh", str(self.current / "install.sh")], capture_output=True, text=True, timeout=300,
+                           env={**os.environ, "UIO_INSTALL_ROOT": str(self.root), "UIO_BIN_DIR": str(self.bindir),
+                                "UIO_RELEASE_BASE": str(self.current), "UIO_INSTALLER": "venv"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.shim = self.bindir / "uio"
+        venv = self.root / "venv"
+        pkg = next(venv.glob("lib/python*/site-packages/ultra_inference_optimization"))
+        self.patch(update, "__file__", str(pkg / "update.py"))
+        self.patch(update.sys, "prefix", str(venv))
+        self.patch(tempfile, "tempdir", str(self.tmp))
+        self.patch(update.shutil, "which", lambda n: str(self.shim) if n == "uio" else None)
+        self.releases = {f"v{__version__}": self.current, "v9.9.9": self.new}
+        self.patch(update, "release_base", lambda tag: str(self.releases[tag]))
+
+    def version(self):
+        return subprocess.run([str(self.shim), "--version"], capture_output=True, text=True).stdout.strip()
+
+    def plan(self):
+        return update.install_plan({"tag": "v9.9.9", "version": "9.9.9"})
+
+    def tampered(self, name, edit):
+        dest = Path(self._work.name) / f"{name}-{self.id().rsplit('.', 1)[-1]}"
+        shutil.copytree(self.new, dest)
+        edit(dest)
+        return dest
+
+    def test_update_verifies_installs_keeps_one_rollback_and_rollback_restores(self):
+        self.assertEqual(update.install_kind(), "installer")
+        plan = self.plan()
+        self.assertEqual((plan["root"], plan["bin"], plan["backend"]), (str(self.root), str(self.bindir), "venv"))
+        update.run_install(plan)
+        self.assertEqual(self.version(), "uio 9.9.9")
+        self.assertEqual(list(self.tmp.iterdir()), [])  # the download folder is gone
+        self.assertFalse((self.root / "venv.old").exists())
+        prev = update.load_state()["previous"]
+        self.assertEqual((prev["kind"], prev["tag"], prev["to"]), ("installer", f"v{__version__}", "9.9.9"))
+        res = update.rollback()
+        self.assertEqual(res, {"status": "rolled-back", "version": __version__, "skipped": "9.9.9"})
+        self.assertEqual(self.version(), f"uio {__version__}")
+        self.assertEqual(update.load_state()["skip"], "9.9.9")
+
+    def test_an_install_sh_that_does_not_match_sha256sums_never_runs(self):
+        def edit(d):
+            (d / "install.sh").write_text('#!/bin/sh\ntouch "$UIO_INSTALL_ROOT/ran"\n')
+        self.releases["v9.9.9"] = self.tampered("bad-script", edit)
+        with mock.patch.object(update, "_run", side_effect=AssertionError("ran")) as run:
+            with self.assertRaises(Failed) as c:
+                update.run_install(self.plan())
+        self.assertEqual(c.exception.cause, "install-failed")
+        self.assertIn("does not match the release's SHA256SUMS", c.exception.message)
+        run.assert_not_called()
+        self.assertEqual(self.version(), f"uio {__version__}")
+        self.assertEqual(list(self.tmp.iterdir()), [])
+        self.assertIsNone(update.load_state()["previous"])
+
+    def test_a_wheel_that_does_not_match_installs_nothing(self):
+        def edit(d):
+            wheel = next(d.glob("*.whl"))
+            wheel.write_bytes(wheel.read_bytes() + b"tampered")
+        self.releases["v9.9.9"] = self.tampered("bad-wheel", edit)
+        with self.assertRaises(Failed) as c:
+            update.run_install(self.plan())
+        self.assertIn("checksum mismatch", c.exception.message)
+        self.assertEqual(self.version(), f"uio {__version__}")
+        self.assertFalse((self.root / "venv.old").exists())
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_a_failed_install_that_broke_the_shim_reinstalls_the_running_release(self):
+        broken = ('#!/bin/sh\nprintf \'#!/bin/sh\\n%s\\nexit 1\\n\' "' + update.SHIM_MARKER + '" > "$UIO_BIN_DIR/uio"\n'
+                  'exit 1\n')
+
+        def edit(d):
+            (d / "install.sh").write_text(broken)
+            sums = [x for x in (d / "SHA256SUMS").read_text().splitlines() if not x.endswith(" install.sh")]
+            sums.append(f"{hashlib.sha256(broken.encode()).hexdigest()}  install.sh")
+            (d / "SHA256SUMS").write_text("\n".join(sums) + "\n")
+        self.releases["v9.9.9"] = self.tampered("broken", edit)
+        with self.assertRaises(Failed):
+            update.run_install(self.plan())
+        self.assertEqual(self.version(), f"uio {__version__}")
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_each_real_backend_is_detected_by_the_installed_copy(self):
+        probe = ("import json; from ultra_inference_optimization import update; "
+                 "print(json.dumps(update.install_plan({'tag': 'v9.9.9', 'version': '9.9.9'})))")
+        for backend in ("venv", "uv", "pipx"):
+            if backend != "venv" and not shutil.which(backend):
+                continue
+            with self.subTest(backend=backend):
+                root, bindir = self.tmp.parent / f"root-{backend}", self.tmp.parent / f"bin-{backend}"
+                env = {**os.environ, "UIO_INSTALL_ROOT": str(root), "UIO_BIN_DIR": str(bindir),
+                       "UIO_RELEASE_BASE": str(self.current), "UIO_INSTALLER": backend,
+                       "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+                r = subprocess.run(["sh", str(self.current / "install.sh")], capture_output=True, text=True,
+                                   timeout=300, env=env)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                target = update._shim_target((bindir / "uio").read_text())  # the backend's own uio command
+                python = Path(os.path.realpath(target)).parent / "python"
+                out = subprocess.run([str(python), "-I", "-c", probe], capture_output=True, text=True, timeout=60,
+                                     env={k: v for k, v in env.items() if k != "UIO_RELEASE_BASE"})
+                self.assertEqual(out.returncode, 0, out.stderr)
+                plan = json.loads(out.stdout)
+                self.assertEqual((plan["kind"], plan["backend"], plan["root"], plan["bin"]),
+                                 ("installer", backend, str(root), str(bindir)))
+
+    def test_assets_come_only_from_the_release_over_https(self):
+        self.assertEqual(REAL_RELEASE_BASE("v9.9.9"), f"{update.SOURCE}/releases/download/v9.9.9")
+        with self.assertRaises(Failed) as c:
+            update._download("http://example.invalid/install.sh", self.tmp / "x")
+        self.assertIn("only fetched over https", c.exception.message)
+        self.assertEqual(update.listed_sha256("A" * 64 + "  *install.sh\n", "install.sh"), "a" * 64)
+        self.assertIsNone(update.listed_sha256("abc  install.sh\n", "install.sh"))
 
 
 class NoDebris(EnvBase):
@@ -554,8 +731,9 @@ class Docs(unittest.TestCase):
         self.assertIn("PRIVACY.md", " ".join(privacy))
         self.assertIn("uio-update-check", (ROOT / "PRIVACY.md").read_text())
         self.assertIn(f'version = "{__version__}"', (ROOT / "pyproject.toml").read_text())
-        for name in ("README.md", "install.sh"):
-            self.assertIn(f"@v{__version__}", (ROOT / name).read_text())
+        self.assertIn(f"@v{__version__}", (ROOT / "README.md").read_text())
+        self.assertIn(f'version = "{__version__}"', (ROOT / "uv.lock").read_text())
+        self.assertNotIn("without binary assets", (ROOT / "docs" / "updates.md").read_text())
         self.assertIn(f"## {__version__} ", (ROOT / "CHANGELOG.md").read_text())
         self.assertRegex(update.__doc__, re.compile("anonymous GET", re.I))
 
