@@ -11,8 +11,8 @@ Inspired by the MIT-licensed `inference-optimisation` agent skill; this is an in
 Pinned release (works without a checkout):
 
 ```sh
-uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.2.0"
-# or: pipx install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.2.0"
+DO_NOT_TRACK=1 uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.2.0"
+# or: DO_NOT_TRACK=1 pipx install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.2.0"
 ```
 
 From a checkout:
@@ -53,10 +53,11 @@ Skip, rollback and opt-outs: [docs/updates.md](docs/updates.md).
 
 ## Privacy
 
-No telemetry. Besides the server URL you give it, `uio` makes one anonymous request at most once a day: a GET of this
-project's public GitHub latest-release record with the fixed User-Agent `uio-update-check`, carrying no id, version or
-machine data. It is skipped outside an interactive terminal, in CI and agent sessions, and with `UIO_NO_UPDATE_CHECK=1`
-or `uio update --check-auto off`. Details: [PRIVACY.md](PRIVACY.md).
+No telemetry, analytics or crash reporting.
+`uio` talks only to the server you point it at (`uio tune`: the `llama-server` it starts on `127.0.0.1`), plus one
+anonymous release check a day from interactive terminals (off with `UIO_NO_UPDATE_CHECK=1`).
+Local state stays in `~/.cache/uio` (0700/0600): the newest ten run folders, a lock and the update cache.
+Remove it all with `rm -rf ~/.cache/uio`. Details: [PRIVACY.md](PRIVACY.md).
 
 Method: see [docs/METHOD.md](docs/METHOD.md). Agent skill: [SKILL.md](SKILL.md).
 

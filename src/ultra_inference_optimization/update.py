@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import __version__
 from .errors import Failed, Refused, UioError
-from .util import uio_home, write_json
+from .util import private_mkdir, uio_home, write_json
 
 TOOL = "uio"
 SOURCE = "https://github.com/michael-berardi/ultra-inference-optimization"  # the same as [project.urls] Source
@@ -95,7 +95,7 @@ def log(message: str) -> None:
     except OSError:
         old = b""
     line = time.strftime("%Y-%m-%dT%H:%M:%S ") + _CONTROL.sub(" ", message)[:2000] + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    private_mkdir(path.parent)
     tmp = path.with_name(path.name + f".tmp{os.getpid()}")
     with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as fh:
         fh.write((old + line.encode())[-MAX_LOG:])

@@ -11,6 +11,16 @@
 - The check is one anonymous GET of the public latest-release record, at most once per 24 hours, from a detached
   background process with a 4 s timeout. State is one 0600 file; automatic installs log to one file of at most
   256 KB. See `docs/updates.md` and `PRIVACY.md`.
+- Privacy: no telemetry, result uploads or model downloads (audited); regression tests for telemetry packages and
+  endpoints and for network calls outside the server you supply. `PRIVACY.md` holds the detail; the README section is
+  a short summary.
+- Local run state is created with 0700 directories and 0600 files (ledgers, plans, configs, server logs, lock, child
+  PID and last-tune records); files left by older versions are tightened on the next write. `UIO_HOME` and everything
+  below it is tightened to 0700 even when pre-existing; directories that already exist outside it (an explicit
+  `--workdir`, a profile's parent) keep their permissions.
+- Default `tune`/`climb` keep only the ten newest run folders; older benchmark logs are deleted at the start of the next
+  run. An explicit `--workdir` is never pruned.
+- The pinned uv and pipx install commands set `DO_NOT_TRACK=1`.
 
 ## 0.1.1 (2026-11-25)
 

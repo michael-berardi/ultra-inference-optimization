@@ -12,7 +12,7 @@ from pathlib import Path
 from .errors import Failed, Refused
 from .experiment import decide
 from .stats import median, point_ratio
-from .util import append_jsonl, append_text, log, now_iso, stamp, uio_home, write_json
+from .util import append_jsonl, append_text, log, now_iso, private_mkdir, prune_runs, stamp, uio_home, write_json
 
 NUM = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
@@ -59,6 +59,7 @@ class Climber:
         self.metric_cmd, self.params, self.apply_cmd = metric_cmd, params, apply_cmd
         self.hb = direction == "max"
         self.samples, self.budget_s, self.min_gain, self.run, self.seed = samples, budget_s, min_gain, run, seed
+        self.default_workdir = workdir is None
         self.workdir = Path(workdir) if workdir else uio_home() / "runs" / (stamp() + "-climb")
         self.ids = 0
 
@@ -79,8 +80,10 @@ class Climber:
         return rec
 
     def climb(self) -> dict:
+        if self.default_workdir:
+            prune_runs()  # keep only the newest ten default run folders, including their logs
         deadline = time.monotonic() + self.budget_s
-        self.workdir.mkdir(parents=True, exist_ok=True)
+        private_mkdir(self.workdir)
         append_text(self.workdir / "PLAN.md", f"# Climb plan\n\n- started {now_iso()}\n- metric: {self.metric_cmd}\n"
                                               f"- direction: {'max' if self.hb else 'min'}\n\n")
         best = {k: v[0] for k, v in self.params.items()}
