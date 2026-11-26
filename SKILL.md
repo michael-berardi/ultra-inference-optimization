@@ -35,6 +35,7 @@ You improve how fast one local model server runs on one machine, and you prove e
 - Lossy levers (for example a quantised KV cache) are labelled and only run with `--allow lossy`.
 - Do not benchmark on battery or in low-power mode; `uio` refuses and voids a run if that changes mid-run.
 - Plateau = three consecutive levers whose every variant was noise. Stop there and report the percentage of the ceiling reached.
-- Exit codes: 0 ok, 2 refused (the `error` field names the cause), 3 failed.
+- Exit codes: 0 ok, 2 refused (the `error` field names the cause), 3 failed; `uio update --check` also uses 10 (update available) and 1 (check failed).
+- Updates: `uio` checks nothing by itself in an agent session. You may run `uio update --check` once at the start; on exit 10 tell the user once (`uio <new> available (you have <current>) · run: uio update`). Install, skip or turn on `--auto` only when the user asks. See `docs/updates.md`.
 
 See `docs/METHOD.md` for the reasoning behind each rule.

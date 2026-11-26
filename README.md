@@ -1,8 +1,8 @@
 # ultra-inference-optimization (`uio`)
 
 Measure, bound and hill-climb the speed of a local LLM server, with evidence instead of vibes.
-Pure Python 3.10+ standard library at runtime. No telemetry, no update checks, no network except
-the server URL you point it at.
+Pure Python 3.10+ standard library at runtime. No telemetry; no network except the server URL you
+point it at and one anonymous release check a day from interactive terminals (see [Privacy](#privacy)).
 
 Inspired by the MIT-licensed `inference-optimisation` agent skill; this is an independent implementation.
 
@@ -11,8 +11,8 @@ Inspired by the MIT-licensed `inference-optimisation` agent skill; this is an in
 Pinned release (works without a checkout):
 
 ```sh
-uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.1"
-# or: pipx install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.1"
+uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.2.0"
+# or: pipx install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.2.0"
 ```
 
 From a checkout:
@@ -35,6 +35,7 @@ Every command prints one JSON object on stdout (`--human` for text). Exit codes:
 | `uio bench --base-url URL [--samples 6] [--panel default\|FILE] [--long-context]` | decode tok/s, prefill tok/s, TTFT, draft acceptance, sanity flags |
 | `uio tune --profile P.json [--budget 45m] [--target decode\|prefill\|ttft\|balanced] [--allow lossless\|lossy] [--apply]` | launches its own `llama-server`, hill-climbs the lever catalog, gates the winner |
 | `uio climb --metric-cmd C --param NAME=v1,v2 --apply-cmd C` | the same statistics for any numeric metric |
+| `uio update [--check] [--skip] [--auto on\|off\|status] [--rollback]` | install the latest release (see [Updates](#updates)) |
 
 `tune` reads a local profile JSON with `source.path` (model file), `ctx`, `extraArgs` (the baseline) and optionally `port`.
 `--apply` rewrites only `extraArgs`, with a unique timestamped backup, an fsynced temp file, an atomic replace and mode 0600, and
@@ -42,6 +43,20 @@ only when every gate passed **and** a confirmation round reproduced the gain (se
 `applied` (`written`, the exact `extraArgs` written, `backup`, and a `reason` when nothing was written, for example
 `confirmation-failed`, `profile-changed` or `launch-flag-removed`). Only the per-flag difference from the launch flags is
 written; a removed launch flag or a repeatable flag such as `--lora-scaled` refuses the write.
+
+## Updates
+
+After a command in an interactive terminal, `uio` prints a two-line stderr notice when a newer release exists.
+`uio update` installs it with whatever installed `uio` (uv, pipx or `install.sh`); `uio update --check` only reports
+(exit 0 current, 10 available, 1 check failed). Automatic installs are off until `uio update --auto on`.
+Skip, rollback and opt-outs: [docs/updates.md](docs/updates.md).
+
+## Privacy
+
+No telemetry. Besides the server URL you give it, `uio` makes one anonymous request at most once a day: a GET of this
+project's public GitHub latest-release record with the fixed User-Agent `uio-update-check`, carrying no id, version or
+machine data. It is skipped outside an interactive terminal, in CI and agent sessions, and with `UIO_NO_UPDATE_CHECK=1`
+or `uio update --check-auto off`. Details: [PRIVACY.md](PRIVACY.md).
 
 Method: see [docs/METHOD.md](docs/METHOD.md). Agent skill: [SKILL.md](SKILL.md).
 
@@ -71,6 +86,7 @@ confirmation round, no baseline-relative needle gate); the rules below are what 
 
 ## Guarantees
 
+- The update notice is never part of a result: it goes to stderr, and only on a terminal.
 - Tokens are counted from the server's `usage`, never from stream chunks.
 - Each request carries a fresh random prefix, so prefix caches cannot flatter the numbers.
 - A change is kept only if it beats both neighbouring controls, its gain exceeds the gap between those two controls (the

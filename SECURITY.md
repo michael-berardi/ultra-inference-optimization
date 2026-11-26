@@ -12,7 +12,8 @@ Please allow time for a fix and coordinated disclosure before publishing details
 
 ## Security boundaries
 
-- `uio` runs locally using only the Python 3.10+ standard library at runtime. It sends no telemetry, performs no update checks, and makes no network requests except to the local server URL you supply.
+- `uio` runs locally using only the Python 3.10+ standard library at runtime. It sends no telemetry. Besides the server URL you supply, it makes one anonymous release check at most once a day, only after a command run in an interactive terminal and never in CI or agent sessions (see `PRIVACY.md`).
+- `uio update` installs only a published stable release tag: through uv or pipx when they own the install (it never writes into their environments) or through that tag's `install.sh` after checking the tag's version. A failed install puts the running version back; one rollback is kept. Automatic installs are off by default.
 - `uio tune --apply` modifies only `extraArgs` in the profile JSON you specify, after creating a unique timestamped backup with mode `0600` and verifying the file has not changed during the run.
 - `uio climb` executes the `--metric-cmd` and `--apply-cmd` shell commands you provide. Do not pass untrusted parameter values or command templates.
 - `uio ceiling` treats GGUF files as untrusted binary headers and rejects malformed or oversized fields before reading tensor data.

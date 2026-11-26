@@ -3,7 +3,7 @@
 # Offline: copies this checkout, fetches nothing. Refuses to overwrite a uio it did not install.
 set -eu
 
-PINNED='uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.1"'
+PINNED='uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.2.0"'
 not_checkout() {
   cat >&2 <<MSG
 uio install: this script must be run from a checkout of the repository (sh install.sh), not piped from a URL or run

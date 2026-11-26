@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 (2026-11-26)
+
+- Update notice: after a command in an interactive terminal, two stderr lines when a newer stable release exists, at
+  most once a day per version. Never in the JSON result, in CI, in agent sessions, off a terminal or after an opt-out
+  (`UIO_NO_UPDATE_CHECK=1` or `uio update --check-auto off`).
+- `uio update` installs the new release with whatever installed `uio` (uv, pipx, or `install.sh` from the release
+  tag), puts the running version back when that fails, and keeps one rollback (`--rollback`). Also `--check`
+  (exit 0 / 10 / 1), `--skip`, `--auto on|off|status` (off by default) and `--clear-state`.
+- The check is one anonymous GET of the public latest-release record, at most once per 24 hours, from a detached
+  background process with a 4 s timeout. State is one 0600 file; automatic installs log to one file of at most
+  256 KB. See `docs/updates.md` and `PRIVACY.md`.
+
 ## 0.1.1 (2026-11-25)
 
 - `llamacpp.get_value` now follows `llama-server` last-wins semantics when a flag is overridden by `extraArgs` after `launchArgs`, and `catalog()` respects `--cache-type-v=<type>` (`=` syntax) and overrides when deciding whether `-fa off` is valid.

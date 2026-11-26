@@ -6,7 +6,7 @@ import json
 import signal
 import sys
 
-from . import __version__, bench, ceiling, climb, gguf, probe, sysinfo
+from . import __version__, bench, ceiling, climb, gguf, probe, sysinfo, update
 from .engines import get_engine
 from .errors import Failed, Refused, UioError
 from .util import parse_duration
@@ -103,6 +103,10 @@ def cmd_climb(a):
     return c.climb()
 
 
+def cmd_update(a):
+    return update.update_command(a)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="uio", description="Measure, bound and hill-climb local LLM serving speed.")
     p.add_argument("--version", action="version", version=f"uio {__version__}")
@@ -153,6 +157,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--bandwidth", type=float)
     s.set_defaults(fn=cmd_tune)
 
+    s = sub.add_parser("update", help="install the latest release (see docs/updates.md)")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--check", action="store_true", help="report only: exit 0 current, 10 available, 1 check failed")
+    g.add_argument("--skip", action="store_true", help="no notice for this version until a newer one exists")
+    g.add_argument("--auto", choices=["on", "off", "status"], help="install updates automatically (off by default)")
+    g.add_argument("--check-auto", choices=["on", "off", "status"], help="check for updates automatically (on by default)")
+    g.add_argument("--rollback", action="store_true", help="put back the version that ran before the last update")
+    g.add_argument("--clear-state", action="store_true", help="remove the update cache and log (before uninstalling)")
+    s.set_defaults(fn=cmd_update)
+
     s = sub.add_parser("climb", help="generic hill-climb of any numeric metric")
     s.add_argument("--metric-cmd", required=True)
     s.add_argument("--param", action="append", default=[], help="NAME=v1,v2,... (first value is the baseline)")
@@ -182,9 +196,14 @@ def main(argv=None) -> int:
             old[sig] = signal.signal(sig, _raise_signalled)
     except ValueError:  # not the main thread (embedded use): leave the handlers alone
         old = {}
+    succeeded = False
     try:
         emit(args.fn(args), args.human)
+        succeeded = True
         return 0
+    except update.Report as e:
+        emit(e.payload, args.human)
+        return e.code
     except _BenchFailed as e:
         emit({"error": e.cause, "message": e.message, **e.payload}, args.human)
         return 3
@@ -200,3 +219,5 @@ def main(argv=None) -> int:
     finally:
         for sig, h in old.items():
             signal.signal(sig, h)
+        if args.cmd != "update":
+            update.after_command(succeeded)  # stderr notice on a TTY only; the check itself runs detached

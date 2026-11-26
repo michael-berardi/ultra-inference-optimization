@@ -1,6 +1,7 @@
 """Test support: synthetic GGUF writer, fake OpenAI-compatible streaming server, fake engine."""
 import collections
 import json
+import os
 import re
 import struct
 import sys
@@ -10,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+os.environ.setdefault("UIO_NO_UPDATE_CHECK", "1")  # a test run from a terminal never starts a real release check
 
 from ultra_inference_optimization import bench  # noqa: E402
 from ultra_inference_optimization.engines.base import Engine, Server  # noqa: E402

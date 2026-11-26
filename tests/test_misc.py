@@ -254,7 +254,7 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             out = subprocess.run([str(bindir / "uio"), "--version"], capture_output=True, text=True, cwd=d)
             self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertIn("uio 0.1.1", out.stdout)
+            self.assertIn("uio 0.2.0", out.stdout)
             r = self.run_install(root, bindir)  # re-install over our own shim is fine
             self.assertEqual(r.returncode, 0, r.stderr)
 
