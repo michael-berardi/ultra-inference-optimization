@@ -11,11 +11,11 @@ OUT="${1:-dist/release}"
 root=$(pwd -P)
 case "$OUT" in /*) ;; *) OUT="$root/$OUT" ;; esac
 OUT=${OUT%/}
+case "$OUT" in */..|*/../*|*/.|*/./*) echo "build-release: out directory must not contain . or .." >&2; exit 2 ;; esac
 case "$OUT" in
   "$root"/dist/?*) ;;
   *) echo "build-release: out directory must be a non-empty path under $root/dist" >&2; exit 2 ;;
 esac
-case "$OUT" in *"/../"*) echo "build-release: out directory must not contain .." >&2; exit 2 ;; esac
 command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 \
   || { echo "build-release: needs sha256sum or shasum" >&2; exit 1; }
 
