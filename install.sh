@@ -15,11 +15,15 @@ REPO="github.com/michael-berardi/ultra-inference-optimization"
 MARK='# uio-shim: managed by ultra-inference-optimization install.sh'
 TMP=""
 STAGE=""
+VENV=""
+VENV_OLD=""
+SWAPPED=0
 
 abs() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$(pwd)" "$1" ;; esac; }
 HOME_DIR=$(abs "${UIO_INSTALL_ROOT:-$HOME/.local/share/uio}")
 BIN_DIR=$(abs "${UIO_BIN_DIR:-$HOME/.local/bin}")
 SHIM="$BIN_DIR/uio"
+MARKER="$HOME_DIR/.uio-installed"
 if [ -n "${UIO_RELEASE_BASE:-}" ]; then
   case "$UIO_RELEASE_BASE" in
     /*|./*|../*) BASE=$(abs "$UIO_RELEASE_BASE") ;;
@@ -35,7 +39,13 @@ BASE=${BASE%/}
 say() { printf '%s\n' "$*"; }
 die() { printf 'uio install: %s\n' "$*" >&2; exit 1; }
 refuse() { printf 'uio install: %s\n' "$*" >&2; exit 2; }
-trap 'rm -rf "$TMP" "$STAGE"' EXIT
+restore_venv() {
+  [ "$SWAPPED" -eq 1 ] || return 0
+  rm -rf "$VENV"
+  [ ! -d "$VENV_OLD" ] || mv "$VENV_OLD" "$VENV"
+  SWAPPED=0
+}
+trap 'restore_venv; rm -rf "$TMP" "$STAGE"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -79,6 +89,21 @@ check_shim() {
     if [ -L "$SHIM" ] || ! grep -qF "$MARK" "$SHIM" 2>/dev/null; then
       refuse "$SHIM exists and was not installed by this script; it was left alone (move it aside or set UIO_BIN_DIR)"
     fi
+  fi
+}
+
+write_marker() {
+  tmp="$MARKER.tmp.$$"
+  printf '%s\n' '# uio-installed: managed by ultra-inference-optimization install.sh' > "$tmp" \
+    || die "cannot write the ownership marker"
+  mv -f "$tmp" "$MARKER" || die "cannot install the ownership marker"
+}
+
+check_owned_venv() { # check_owned_venv <venv-path>
+  path=$1
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  if [ ! -f "$MARKER" ] || [ ! -d "$path" ] || [ ! -x "$path/bin/uio" ]; then
+    refuse "$path exists and was not installed by this script; it was left alone"
   fi
 }
 
@@ -130,6 +155,7 @@ from ultra_inference_optimization.cli import main  # noqa: E402
 sys.exit(main())
 LAUNCHER
   write_shim "$dest/uio_launcher.py" "$PY"
+  write_marker
 }
 
 install_uv() {
@@ -142,23 +168,28 @@ install_uv() {
     || die "uv could not install the wheel"
   [ -x "$UV_BIN/uio" ] || die "uv did not expose a uio command"
   write_shim "$UV_BIN/uio"
+  write_marker
 }
 
 install_pipx() {
   PIPX_HOME_DIR="$HOME_DIR/pipx"
   PIPX_BIN="$HOME_DIR/pipx-bin"
-  mkdir -p "$PIPX_HOME_DIR" "$PIPX_BIN" || die "cannot create the pipx tool folders"
+  mkdir -p "$PIPX_HOME_DIR" "$PIPX_BIN" || { printf 'uio install: cannot create the pipx tool folders\n' >&2; return 1; }
   PIPX_HOME="$PIPX_HOME_DIR" PIPX_BIN_DIR="$PIPX_BIN" PIPX_DEFAULT_BACKEND=pip \
   PIPX_CACHE_HOME="${PIPX_CACHE_HOME:-$HOME_DIR/pipx-cache}" \
     pipx install --force --skip-maintenance --python "$PY" "$1" \
-    || die "pipx could not install the wheel"
-  [ -x "$PIPX_BIN/uio" ] || die "pipx did not expose a uio command"
+    || { printf 'uio install: pipx could not install the wheel\n' >&2; return 1; }
+  [ -x "$PIPX_BIN/uio" ] || { printf 'uio install: pipx did not expose a uio command\n' >&2; return 1; }
   write_shim "$PIPX_BIN/uio"
+  write_marker
 }
 
 install_venv() {
   VENV="$HOME_DIR/venv"
+  VENV_OLD="$VENV.old"
   STAGE="$HOME_DIR/.venv.new.$$"
+  check_owned_venv "$VENV"
+  check_owned_venv "$VENV_OLD"
   rm -rf "$STAGE"
   "$PY" -c 'import ensurepip' >/dev/null 2>&1 \
     || die "this python3 cannot create venvs (ensurepip is missing); on Debian/Ubuntu install python3-venv"
@@ -168,6 +199,7 @@ install_venv() {
   got=$("$STAGE/bin/uio" --version 2>&1) || die "the new copy does not start: $got"
   [ "$got" = "uio $VERSION" ] || die "the new copy reports '$got', not uio $VERSION; nothing was changed"
 
+  write_marker
   rm -rf "$VENV.old"
   [ ! -d "$VENV" ] || mv "$VENV" "$VENV.old" || die "cannot move the old install aside"
   # A venv embeds its creation path in its scripts; rewrite it after the rename, on the same physical path.
@@ -175,6 +207,7 @@ install_venv() {
   PAT=$(printf '%s' "$OLD_PATH" | sed 's/[][\\.*^$|]/\\&/g')
   REP=$(printf '%s' "$VENV" | sed 's/[\\&|]/\\&/g')
   mv "$STAGE" "$VENV" || { [ ! -d "$VENV.old" ] || mv "$VENV.old" "$VENV"; die "cannot move the new venv into place"; }
+  SWAPPED=1
   STAGE=""
   for f in "$VENV/bin/"*; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
@@ -183,8 +216,9 @@ install_venv() {
       cat "$TMP/fix" > "$f" || die "cannot finalize $f"
     fi
   done
-  rm -rf "$VENV.old"
   write_shim "$VENV/bin/uio"
+  rm -rf "$VENV.old"
+  SWAPPED=0
 }
 
 release_install() {
@@ -196,8 +230,11 @@ release_install() {
   fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS"
   WHEEL=$(awk '{ f=$2; sub(/^\*/, "", f); if (f ~ /^ultra_inference_optimization-.*-py3-none-any\.whl$/) { print f; exit } }' "$TMP/SHA256SUMS")
   [ -n "$WHEEL" ] || die "no uio wheel is listed in SHA256SUMS; this is not a uio release"
+  case "$WHEEL" in */*) die "unsafe wheel name '$WHEEL' in SHA256SUMS" ;; esac
   VERSION=${WHEEL#ultra_inference_optimization-}
   VERSION=${VERSION%%-*}
+  printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    || die "bad version '$VERSION' in SHA256SUMS"
   if [ -n "${UIO_VERSION:-}" ] && [ "$VERSION" != "${UIO_VERSION#v}" ]; then
     die "the release at $BASE has version $VERSION, not the requested ${UIO_VERSION#v}"
   fi
@@ -207,10 +244,11 @@ release_install() {
   mkdir -p "$HOME_DIR" "$BIN_DIR" || die "cannot create $HOME_DIR or $BIN_DIR"
   HOME_DIR=$(cd "$HOME_DIR" && pwd -P)
   backend=${UIO_INSTALLER:-auto}
+  auto_pipx=0
   case "$backend" in
     auto)
       if command -v uv >/dev/null 2>&1; then backend=uv
-      elif command -v pipx >/dev/null 2>&1; then backend=pipx
+      elif command -v pipx >/dev/null 2>&1; then backend=pipx; auto_pipx=1
       else backend=venv; fi ;;
     uv|pipx|venv) ;;
     *) die "UIO_INSTALLER must be uv, pipx or venv" ;;
@@ -218,19 +256,32 @@ release_install() {
   say "Installing uio $VERSION with $backend into $HOME_DIR ..."
   case "$backend" in
     uv) install_uv "$TMP/$WHEEL" ;;
-    pipx) install_pipx "$TMP/$WHEEL" ;;
+    pipx)
+      if ! install_pipx "$TMP/$WHEEL"; then
+        if [ "$auto_pipx" -eq 1 ]; then
+          say "pipx failed; falling back to the private venv backend"
+          install_venv "$TMP/$WHEEL"
+        else
+          die "pipx backend failed"
+        fi
+      fi ;;
     venv) install_venv "$TMP/$WHEEL" ;;
   esac
 }
 
 mode=release
-if [ -z "${UIO_RELEASE_BASE:-}" ] && [ -f "${0:-}" ]; then
-  here=$(cd "$(dirname "$0")" && pwd) || here=""
-  if [ -n "$here" ] && [ -f "$here/pyproject.toml" ] \
-     && [ -f "$here/src/ultra_inference_optimization/__init__.py" ]; then
-    mode=checkout
-  fi
-fi
+# A shell name in $0 means this script came from stdin: never let a same-named file in cwd select checkout mode.
+case "${0##*/}" in
+  sh|-sh|bash|-bash|dash|zsh|-zsh|ash|ksh) ;;
+  *)
+    if [ -z "${UIO_RELEASE_BASE:-}" ] && [ -f "${0:-}" ]; then
+      here=$(cd "$(dirname "$0")" && pwd) || here=""
+      if [ -n "$here" ] && [ -f "$here/pyproject.toml" ] \
+         && [ -f "$here/src/ultra_inference_optimization/__init__.py" ]; then
+        mode=checkout
+      fi
+    fi ;;
+esac
 case "$mode" in
   checkout) checkout_install ;;
   release) release_install ;;

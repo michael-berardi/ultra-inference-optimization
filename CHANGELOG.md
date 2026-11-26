@@ -3,7 +3,7 @@
 ## 0.2.0 (2026-11-26)
 
 - Add release assets and a one-line installer: `install.sh` downloads the wheel and `SHA256SUMS`, verifies the wheel before installing, and uses uv, pipx or a private venv under `~/.local/share/uio`, with a managed shim in `~/.local/bin` that refuses to overwrite a foreign command.
-- Keep the offline checkout installer working in the same script; add `install.ps1` for Windows via WSL and `scripts/build-release.sh` for reproducible wheel, installer and checksum assets.
+- Keep the offline checkout installer working in the same script; add `install.ps1` for Windows via WSL and `scripts/build-release.sh` for wheel, installer and checksum assets.
 - Add installer tests that build a local release directory and run the installer against it with a temporary HOME, covering venv, uv, pipx, bad checksums and foreign-shim refusal.
 - Add `uv.lock` and bump the version to 0.2.0.
 
