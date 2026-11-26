@@ -5,7 +5,7 @@ import fcntl
 import os
 
 from .errors import Refused
-from .util import uio_home
+from .util import private_mkdir, uio_home
 
 
 class RunLock:
@@ -14,8 +14,10 @@ class RunLock:
         self._fh = None
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(self.path, "a+")
+        private_mkdir(self.path.parent)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        os.fchmod(fd, 0o600)
+        fh = os.fdopen(fd, "a+")
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:

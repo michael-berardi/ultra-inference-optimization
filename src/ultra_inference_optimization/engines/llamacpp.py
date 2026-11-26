@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 
 from .. import probe, sysinfo
+from ..util import private_mkdir
 from ..errors import Failed, Refused
 from .base import Engine, Lever, Server, Variant
 
@@ -257,8 +258,10 @@ class LlamaCppEngine(Engine):
 
     def start(self, profile, args, port, log_path) -> LlamaServer:
         cmd = self.build_command(profile, args, port)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(log_path, "ab")
+        private_mkdir(log_path.parent)
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.fchmod(fd, 0o600)  # server logs can contain model paths and prompts
+        fh = os.fdopen(fd, "ab")
         proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
         srv = LlamaServer(proc, f"http://127.0.0.1:{port}", fh)
         try:

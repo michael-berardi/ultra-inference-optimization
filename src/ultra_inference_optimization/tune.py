@@ -11,7 +11,7 @@ from .errors import BudgetExceeded, Failed, Refused, UioError
 from .experiment import METRIC_DIRECTION, TARGETS, control_gap, decide, pool, summarize
 from .lock import RunLock
 from .stats import median, point_ratio
-from .util import append_jsonl, append_text, log, now_iso, stamp, uio_home, write_json
+from .util import append_jsonl, append_text, log, now_iso, private_mkdir, prune_runs, stamp, uio_home, write_json
 
 GIB = 1024 ** 3
 MIB = 1024 ** 2
@@ -63,6 +63,7 @@ class Tuner:
             raise Refused("bad-allow", "allow must be lossless or lossy")
         self.profile_path, self.engine, self.target_name, self.allow = profile_path, engine, target, allow
         self.budget_s, self.apply, self.samples, self.min_gain = budget_s, apply, samples, min_gain
+        self.default_workdir = workdir is None
         self.workdir = Path(workdir) if workdir else uio_home() / "runs" / stamp()
         self.mem_cap = mem_cap_bytes
         self.bandwidth = bandwidth_gbs
@@ -281,6 +282,8 @@ class Tuner:
 
     # ---- driver -------------------------------------------------------------------------
     def tune(self) -> dict:
+        if self.default_workdir:
+            prune_runs()  # keep only the newest ten default run folders, including their logs
         g = gguf.read_gguf(self.profile["source"]["path"]) if self._model_exists() else None
         if g is None:
             raise Refused("model-not-found", f"source.path does not exist: {self.profile['source']['path']}")
@@ -329,7 +332,7 @@ class Tuner:
     def _tune(self, g) -> dict:
         t_start = time.monotonic()
         self.deadline = t_start + self.budget_s
-        self.workdir.mkdir(parents=True, exist_ok=True)
+        private_mkdir(self.workdir)
         machine = sysinfo.machine()
         if self.mem_cap is None and machine.get("memoryBytes"):
             self.mem_cap = machine["memoryBytes"] * 0.85

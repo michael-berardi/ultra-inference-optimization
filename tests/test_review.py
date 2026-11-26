@@ -516,7 +516,7 @@ class Install(unittest.TestCase):  # 3, 17
             r = subprocess.run(["sh"], input=(ROOT / "install.sh").read_text(), capture_output=True, text=True, cwd=d,
                                env={**os.environ, "UIO_INSTALL_ROOT": d + "/s", "UIO_BIN_DIR": d + "/b"})
             self.assertEqual(r.returncode, 2, r.stdout)
-            self.assertIn("@v0.1.1", r.stderr)
+            self.assertIn("@v0.1.2", r.stderr)
             self.assertFalse((Path(d) / "s").exists())
             lone = Path(d) / "install.sh"
             lone.write_text((ROOT / "install.sh").read_text())
@@ -534,9 +534,9 @@ class Install(unittest.TestCase):  # 3, 17
             shim = (bindir / "uio").read_text()
             self.assertIn(" -I ", shim)
             self.assertTrue(shim.split("exec '")[1].startswith("/"))
-            self.assertTrue((root / "0.1.1" / "uio_launcher.py").exists())
+            self.assertTrue((root / "0.1.2" / "uio_launcher.py").exists())
             out = subprocess.run([str(bindir / "uio"), "--version"], capture_output=True, text=True, cwd=d)
-            self.assertIn("uio 0.1.1", out.stdout, out.stderr)
+            self.assertIn("uio 0.1.2", out.stdout, out.stderr)
             self.assertFalse((Path(d) / "pwned").exists())
             self.assertFalse((Path.cwd() / "pwned").exists())
 
@@ -544,7 +544,7 @@ class Install(unittest.TestCase):  # 3, 17
 class Docs(unittest.TestCase):  # 3, 8, 13
     def test_readme_matches_the_behaviour(self):
         t = (ROOT / "README.md").read_text()
-        self.assertIn("@v0.1.1", t)
+        self.assertIn("@v0.1.2", t)
         self.assertIn("confirmation", t.lower())
         self.assertIn("flash attention and ubatch size", t)
         self.assertIn("not reached", t)

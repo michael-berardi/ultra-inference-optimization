@@ -11,8 +11,8 @@ Inspired by the MIT-licensed `inference-optimisation` agent skill; this is an in
 Pinned release (works without a checkout):
 
 ```sh
-uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.1"
-# or: pipx install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.1"
+DO_NOT_TRACK=1 uv tool install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.2"
+# or: DO_NOT_TRACK=1 pipx install "git+https://github.com/michael-berardi/ultra-inference-optimization@v0.1.2"
 ```
 
 From a checkout:
@@ -93,6 +93,26 @@ confirmation round, no baseline-relative needle gate); the rules below are what 
   exclusive lock at `~/.cache/uio/lock`. SIGTERM and SIGHUP stop the server cleanly; a server left behind by a hard kill is
   found by PID and start time and stopped by the next run.
 - The tool ships no model id, publisher, repository or quantisation default.
+
+## Privacy
+
+`uio` sends nothing over the network on its own. There is no telemetry, analytics, crash reporting, update check,
+model download or upload of benchmark results, and no runtime dependencies. There is no shipped UI, web page, font
+or remote script.
+
+`uio bench` sends the benchmark prompts to the `--base-url` you supply (your prompts if you passed `--panel FILE`,
+otherwise prompts generated locally). `uio tune` sends them to the `llama-server` it starts itself, bound to
+`127.0.0.1`. If you point `--base-url` at a remote server, that server's operator receives the prompts and sees your
+connection. `uio climb` runs the shell commands you give it; whatever they send is your own configuration.
+
+Local state lives in `~/.cache/uio` (or `UIO_HOME`): run folders with plans, ledgers, configs and server logs, a lock
+file holding a PID, a child-PID file, and a `last/` record holding profile paths and metrics. Directories are 0700
+and files 0600. The newest ten run folders are kept; older ones are deleted at the start of the next `tune` or
+`climb` (only for the default workdir; an explicit `--workdir` is left alone). With `--apply`, a 0600 backup of the
+profile is written next to the profile.
+
+Delete it all with `rm -rf ~/.cache/uio`, plus any `*.bak-*` files next to profiles you applied to. The install
+commands above are run by you and fetch the pinned source; the installed tool does not fetch code.
 
 ## Tests
 
