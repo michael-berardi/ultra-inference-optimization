@@ -511,18 +511,20 @@ class Budget(TuneBase):  # 16
 
 
 class Install(unittest.TestCase):  # 3, 17
-    def test_refuses_when_not_run_from_a_checkout(self):
+    def test_release_mode_runs_when_not_in_a_checkout(self):
         with tempfile.TemporaryDirectory() as d:
+            env = {**os.environ, "UIO_INSTALL_ROOT": d + "/s", "UIO_BIN_DIR": d + "/b",
+                   "UIO_RELEASE_BASE": d + "/missing-release"}
             r = subprocess.run(["sh"], input=(ROOT / "install.sh").read_text(), capture_output=True, text=True, cwd=d,
-                               env={**os.environ, "UIO_INSTALL_ROOT": d + "/s", "UIO_BIN_DIR": d + "/b"})
-            self.assertEqual(r.returncode, 2, r.stdout)
-            self.assertIn("@v0.1.1", r.stderr)
+                               env=env)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertIn("SHA256SUMS", r.stderr)
             self.assertFalse((Path(d) / "s").exists())
             lone = Path(d) / "install.sh"
             lone.write_text((ROOT / "install.sh").read_text())
-            r = subprocess.run(["sh", str(lone)], capture_output=True, text=True, cwd=d,
-                               env={**os.environ, "UIO_INSTALL_ROOT": d + "/s", "UIO_BIN_DIR": d + "/b"})
-            self.assertEqual(r.returncode, 2)
+            r = subprocess.run(["sh", str(lone)], capture_output=True, text=True, cwd=d, env=env)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("SHA256SUMS", r.stderr)
             self.assertFalse((Path(d) / "s").exists())
 
     def test_launcher_runs_isolated_under_an_absolute_python_and_a_hostile_path(self):
@@ -534,9 +536,9 @@ class Install(unittest.TestCase):  # 3, 17
             shim = (bindir / "uio").read_text()
             self.assertIn(" -I ", shim)
             self.assertTrue(shim.split("exec '")[1].startswith("/"))
-            self.assertTrue((root / "0.1.1" / "uio_launcher.py").exists())
+            self.assertTrue((root / "0.2.0" / "uio_launcher.py").exists())
             out = subprocess.run([str(bindir / "uio"), "--version"], capture_output=True, text=True, cwd=d)
-            self.assertIn("uio 0.1.1", out.stdout, out.stderr)
+            self.assertIn("uio 0.2.0", out.stdout, out.stderr)
             self.assertFalse((Path(d) / "pwned").exists())
             self.assertFalse((Path.cwd() / "pwned").exists())
 
@@ -544,7 +546,8 @@ class Install(unittest.TestCase):  # 3, 17
 class Docs(unittest.TestCase):  # 3, 8, 13
     def test_readme_matches_the_behaviour(self):
         t = (ROOT / "README.md").read_text()
-        self.assertIn("@v0.1.1", t)
+        self.assertIn("@v0.2.0", t)
+        self.assertIn("releases/latest/download/install.sh", t)
         self.assertIn("confirmation", t.lower())
         self.assertIn("flash attention and ubatch size", t)
         self.assertIn("not reached", t)

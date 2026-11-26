@@ -247,14 +247,14 @@ class InstallTests(unittest.TestCase):
             foreign.write_text("#!/bin/sh\necho foreign\n")
             r = self.run_install(root, bindir)
             self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-            self.assertIn("not installed by this script", r.stderr)
+            self.assertIn("was not installed by this script", r.stderr)
             self.assertEqual(foreign.read_text(), "#!/bin/sh\necho foreign\n")
             foreign.unlink()
             r = self.run_install(root, bindir)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             out = subprocess.run([str(bindir / "uio"), "--version"], capture_output=True, text=True, cwd=d)
             self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertIn("uio 0.1.1", out.stdout)
+            self.assertIn("uio 0.2.0", out.stdout)
             r = self.run_install(root, bindir)  # re-install over our own shim is fine
             self.assertEqual(r.returncode, 0, r.stderr)
 

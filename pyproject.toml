@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ultra-inference-optimization"
-version = "0.1.1"
+version = "0.2.0"
 description = "Measure, bound and hill-climb the speed of a local LLM server, with evidence."
 readme = "README.md"
 license = { text = "MIT" }
