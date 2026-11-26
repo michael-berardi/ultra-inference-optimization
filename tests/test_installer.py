@@ -244,14 +244,15 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue((home / ".local/share/uio/venv/bin/uio").exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class BuildReleaseOutDirTests(unittest.TestCase):
     def test_dot_segments_in_out_dir_are_refused(self):
         for out in ("dist/..", "dist/x/..", "dist/./x", "."):
             proc = subprocess.run(["sh", str(ROOT / "scripts/build-release.sh"), out],
                                   cwd=ROOT, capture_output=True, text=True)
-            self.assertNotEqual(proc.returncode, 0, out)
+            self.assertEqual(proc.returncode, 2, out)
+            self.assertIn("must not contain . or ..", proc.stderr, out)
             self.assertTrue((ROOT / "pyproject.toml").exists(), out)
+
+
+if __name__ == "__main__":
+    unittest.main()

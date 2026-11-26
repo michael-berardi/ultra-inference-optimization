@@ -7,7 +7,6 @@
 set -eu
 cd "$(dirname "$0")/.."
 OUT="${1:-dist/release}"
-[ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "build-release: the working tree has changes; build from a clean checkout" >&2; exit 1; }
 root=$(pwd -P)
 case "$OUT" in /*) ;; *) OUT="$root/$OUT" ;; esac
 OUT=${OUT%/}
@@ -16,6 +15,7 @@ case "$OUT" in
   "$root"/dist/?*) ;;
   *) echo "build-release: out directory must be a non-empty path under $root/dist" >&2; exit 2 ;;
 esac
+[ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "build-release: the working tree has changes; build from a clean checkout" >&2; exit 1; }
 command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 \
   || { echo "build-release: needs sha256sum or shasum" >&2; exit 1; }
 
