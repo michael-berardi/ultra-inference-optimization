@@ -13,7 +13,7 @@ from unittest import mock
 
 import support  # noqa: F401  (puts src on sys.path)
 from support import FakeBehavior, FakeServer, tiny_model
-from ultra_inference_optimization import bench, cli, util
+from ultra_inference_optimization import bench, cli, climb, profile, util
 from ultra_inference_optimization.engines import llamacpp
 from ultra_inference_optimization.lock import RunLock
 
@@ -136,6 +136,70 @@ class PrivateLocalState(unittest.TestCase):
                 self.assertEqual(set(removed), set(made[:2]))
                 self.assertFalse(any(p.exists() for p in made[:2]))
                 self.assertTrue(all(p.exists() for p in made[2:]))
+
+
+class DirectoryOwnership(unittest.TestCase):
+    """private_mkdir must not tighten directories the user already owns outside UIO_HOME."""
+
+    def test_existing_workdir_outside_uio_home_keeps_0755(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with mock.patch.dict(os.environ, {"UIO_HOME": str(root / "home")}):
+                workdir = root / "project"
+                workdir.mkdir(mode=0o755)
+                os.chmod(workdir, 0o755)
+
+                # Direct call, then the path a CLI --workdir takes through the runner.
+                util.private_mkdir(workdir)
+                self.assertEqual(stat.S_IMODE(workdir.stat().st_mode), 0o755)
+
+                values = iter(range(1, 10000))
+
+                def run(_cmd, timeout=0):
+                    return str(next(values) / 1000.0)
+
+                c = climb.Climber("measure", climb.parse_params(["a=1,2"]), "set a={a}",
+                                  workdir=workdir, run=run)
+                c.climb()
+                self.assertEqual(stat.S_IMODE(workdir.stat().st_mode), 0o755)
+
+    def test_existing_profile_parent_keeps_0755_and_profile_is_0600(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with mock.patch.dict(os.environ, {"UIO_HOME": str(root / "home")}):
+                folder = root / "profiles"
+                folder.mkdir(mode=0o755)
+                os.chmod(folder, 0o755)
+                p = folder / "model.json"
+                p.write_text(json.dumps({"source": {"path": "m"}, "ctx": 8, "extraArgs": []}))
+                os.chmod(p, 0o644)
+
+                result = profile.apply_extra_args(str(p), ["-b", "1024"])
+                self.assertTrue(result["written"])
+                self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o755)
+                self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(Path(result["backup"]).stat().st_mode), 0o600)
+
+    def test_new_directories_outside_uio_home_are_0700(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with mock.patch.dict(os.environ, {"UIO_HOME": str(root / "home")}):
+                first, second, leaf = root / "outside", root / "outside" / "deep", root / "outside" / "deep" / "new"
+                util.private_mkdir(leaf)
+                for p in (first, second, leaf):
+                    self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o700, p)
+
+    def test_existing_uio_home_and_subtree_are_0700(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            home, runs, leaf = root / "home", root / "home" / "runs", root / "home" / "runs" / "x"
+            for p in (home, runs, leaf):
+                p.mkdir(mode=0o755)
+                os.chmod(p, 0o755)
+            with mock.patch.dict(os.environ, {"UIO_HOME": str(home)}):
+                util.private_mkdir(leaf)
+            for p in (home, runs, leaf):
+                self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o700, p)
 
 
 if __name__ == "__main__":

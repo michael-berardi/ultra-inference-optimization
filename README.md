@@ -106,10 +106,12 @@ otherwise prompts generated locally). `uio tune` sends them to the `llama-server
 connection. `uio climb` runs the shell commands you give it; whatever they send is your own configuration.
 
 Local state lives in `~/.cache/uio` (or `UIO_HOME`): run folders with plans, ledgers, configs and server logs, a lock
-file holding a PID, a child-PID file, and a `last/` record holding profile paths and metrics. Directories are 0700
-and files 0600. The newest ten run folders are kept; older ones are deleted at the start of the next `tune` or
-`climb` (only for the default workdir; an explicit `--workdir` is left alone). With `--apply`, a 0600 backup of the
-profile is written next to the profile.
+file holding a PID, a child-PID file, and a `last/` record holding profile paths and metrics. Files are 0600 and
+directories newly created by `uio` are 0700; `~/.cache/uio` itself and everything below it are tightened to 0700
+even if they already existed. Directories that already exist outside `~/.cache/uio` -- including an explicit
+`--workdir` and a profile's parent -- are never chmodded and keep their own permissions. The newest ten run folders
+are kept; older ones are deleted at the start of the next `tune` or `climb` (only for the default workdir; an
+explicit `--workdir` is left alone). With `--apply`, a 0600 backup of the profile is written next to the profile.
 
 Delete it all with `rm -rf ~/.cache/uio`, plus any `*.bak-*` files next to profiles you applied to. The install
 commands above are run by you and fetch the pinned source; the installed tool does not fetch code.

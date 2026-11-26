@@ -5,7 +5,9 @@
 - Privacy audit: no telemetry, result uploads or model downloads were found; added a README Privacy section and
   regression tests for telemetry packages/endpoints and for network calls outside the server you supply.
 - Local run state is now created with 0700 directories and 0600 files (ledgers, plans, configs, server logs, lock,
-  child PID and last-tune records); files left by older versions are tightened on the next write.
+  child PID and last-tune records); files left by older versions are tightened on the next write. New directories are
+  0700, and UIO_HOME plus everything below it is tightened to 0700 even when pre-existing; directories that already
+  exist outside UIO_HOME (an explicit `--workdir`, a profile's parent) keep their permissions.
 - Default `tune`/`climb` now keep only the ten newest run folders; older benchmark logs are deleted at the start of
   the next run. An explicit `--workdir` is never pruned.
 - Install and pinned release commands are updated to 0.1.2 and set `DO_NOT_TRACK=1`.

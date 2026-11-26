@@ -22,21 +22,37 @@ def uio_home() -> Path:
 
 
 def private_mkdir(path: Path) -> None:
-    """Create (or tighten) a directory that holds local run data: owner read/write/execute only.
+    """Create a directory for local run data with owner read/write/execute only (0700).
 
-    Directories below UIO_HOME are tightened too (parents created by mkdir are 0755 by default);
-    ancestors above UIO_HOME, and the parents of an explicit --workdir, are left alone.
+    Only directories this call actually creates are chmodded. UIO_HOME and everything below it
+    are tightened to 0700 even when they already existed, so private run state stays private.
+    Pre-existing directories outside UIO_HOME -- an explicit --workdir, a profile's parent, or
+    any other user-chosen folder -- keep their permissions; files written inside them are 0600.
     """
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = Path(os.path.abspath(path))
     base = Path(os.path.abspath(uio_home()))
-    os.chmod(target, 0o700)
-    if target != base and base in target.parents:
-        parent = target.parent
-        while parent != base:
-            os.chmod(parent, 0o700)
-            parent = parent.parent
-        os.chmod(base, 0o700)
+
+    # Snapshot which components are missing before mkdir: existing user directories are not ours to chmod.
+    missing: list[Path] = []
+    cursor = target
+    while not cursor.exists():
+        missing.append(cursor)
+        if cursor.parent == cursor:  # filesystem root exists; stop defensively
+            break
+        cursor = cursor.parent
+
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    tighten = set(missing)
+    if target == base or base in target.parents:
+        component = target
+        while True:
+            tighten.add(component)
+            if component == base:
+                break
+            component = component.parent
+    for component in tighten:
+        os.chmod(component, 0o700)
 
 
 def prune_runs(home: Path | None = None, keep: int = RUN_RETENTION) -> list[Path]:
