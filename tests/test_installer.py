@@ -245,43 +245,60 @@ class InstallerTests(unittest.TestCase):
 
 
 class BuildReleaseOutDirTests(unittest.TestCase):
+    GIT_CONFIG = ("-c", "commit.gpgsign=false",
+                  "-c", "user.name=t",
+                  "-c", "user.email=t@example.invalid")
+
     @staticmethod
-    def snapshot(root: Path):
-        """Record every path under root; a stray delete or write must be visible."""
+    def clean_env():
+        """Keep inherited settings from redirecting git at the real checkout."""
+        return {key: value for key, value in os.environ.items()
+                if not key.startswith("GIT_")}
+
+    @classmethod
+    def git(cls, repo: Path, *args: str):
+        cmd = ["git", "-C", str(repo), *cls.GIT_CONFIG, *args]
+        return subprocess.run(cmd, check=True, capture_output=True, env=cls.clean_env())
+
+    @classmethod
+    def snapshot_tracked(cls, root: Path):
+        """Hash only tracked checkout files, never `.git` internals."""
+        listed = cls.git(root, "ls-files", "-z").stdout.split(b"\0")
         state = {}
-        for path in sorted(root.rglob("*")):
-            rel = str(path.relative_to(root))
+        for raw in listed:
+            if not raw:
+                continue
+            rel = raw.decode("utf-8", "surrogateescape")
+            path = root / rel
             if path.is_symlink():
                 state[rel] = ("symlink", os.readlink(path))
             elif path.is_file():
                 state[rel] = ("file", hashlib.sha256(path.read_bytes()).hexdigest())
             else:
-                state[rel] = ("dir",)
+                state[rel] = ("missing",)
         return state
 
     def test_dot_segments_in_out_dir_are_refused(self):
         # Never run the real script in the developer checkout: a guard regression
         # would reach `rm -rf "$root/dist/.."`. Give it a disposable git repo instead.
-        outside = self.snapshot(ROOT)
+        outside = self.snapshot_tracked(ROOT)
         with tempfile.TemporaryDirectory(prefix="uio-build-release-test-") as tmp:
             repo = Path(tmp) / "checkout"
             (repo / "scripts").mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/build-release.sh", repo / "scripts/build-release.sh")
             shutil.copy2(ROOT / "pyproject.toml", repo / "pyproject.toml")
-            git = ["git", "-C", str(repo), "-c", "user.name=Test",
-                   "-c", "user.email=test@example.invalid"]
-            subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
-            subprocess.run(git + ["add", "."], check=True, capture_output=True)
-            subprocess.run(git + ["commit", "-q", "-m", "fixture"],
-                           check=True, capture_output=True)
-            fixture = self.snapshot(repo)
+            self.git(repo, "init", "-q")
+            self.git(repo, "add", ".")
+            self.git(repo, "commit", "-q", "-m", "fixture")
+            fixture = self.snapshot_tracked(repo)
             for out in ("dist/..", "dist/x/..", "dist/./x", "."):
                 proc = subprocess.run(["sh", "scripts/build-release.sh", out],
-                                      cwd=repo, capture_output=True, text=True)
+                                      cwd=repo, capture_output=True, text=True,
+                                      env=self.clean_env())
                 self.assertEqual(proc.returncode, 2, out)
                 self.assertIn("must not contain . or ..", proc.stderr, out)
-                self.assertEqual(self.snapshot(repo), fixture, out)
-        self.assertEqual(self.snapshot(ROOT), outside, "the real checkout changed")
+                self.assertEqual(self.snapshot_tracked(repo), fixture, out)
+        self.assertEqual(self.snapshot_tracked(ROOT), outside, "the real checkout changed")
 
 
 if __name__ == "__main__":
