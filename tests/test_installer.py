@@ -245,13 +245,43 @@ class InstallerTests(unittest.TestCase):
 
 
 class BuildReleaseOutDirTests(unittest.TestCase):
+    @staticmethod
+    def snapshot(root: Path):
+        """Record every path under root; a stray delete or write must be visible."""
+        state = {}
+        for path in sorted(root.rglob("*")):
+            rel = str(path.relative_to(root))
+            if path.is_symlink():
+                state[rel] = ("symlink", os.readlink(path))
+            elif path.is_file():
+                state[rel] = ("file", hashlib.sha256(path.read_bytes()).hexdigest())
+            else:
+                state[rel] = ("dir",)
+        return state
+
     def test_dot_segments_in_out_dir_are_refused(self):
-        for out in ("dist/..", "dist/x/..", "dist/./x", "."):
-            proc = subprocess.run(["sh", str(ROOT / "scripts/build-release.sh"), out],
-                                  cwd=ROOT, capture_output=True, text=True)
-            self.assertEqual(proc.returncode, 2, out)
-            self.assertIn("must not contain . or ..", proc.stderr, out)
-            self.assertTrue((ROOT / "pyproject.toml").exists(), out)
+        # Never run the real script in the developer checkout: a guard regression
+        # would reach `rm -rf "$root/dist/.."`. Give it a disposable git repo instead.
+        outside = self.snapshot(ROOT)
+        with tempfile.TemporaryDirectory(prefix="uio-build-release-test-") as tmp:
+            repo = Path(tmp) / "checkout"
+            (repo / "scripts").mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts/build-release.sh", repo / "scripts/build-release.sh")
+            shutil.copy2(ROOT / "pyproject.toml", repo / "pyproject.toml")
+            git = ["git", "-C", str(repo), "-c", "user.name=Test",
+                   "-c", "user.email=test@example.invalid"]
+            subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+            subprocess.run(git + ["add", "."], check=True, capture_output=True)
+            subprocess.run(git + ["commit", "-q", "-m", "fixture"],
+                           check=True, capture_output=True)
+            fixture = self.snapshot(repo)
+            for out in ("dist/..", "dist/x/..", "dist/./x", "."):
+                proc = subprocess.run(["sh", "scripts/build-release.sh", out],
+                                      cwd=repo, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 2, out)
+                self.assertIn("must not contain . or ..", proc.stderr, out)
+                self.assertEqual(self.snapshot(repo), fixture, out)
+        self.assertEqual(self.snapshot(ROOT), outside, "the real checkout changed")
 
 
 if __name__ == "__main__":
